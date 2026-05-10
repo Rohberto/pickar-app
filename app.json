@@ -4,7 +4,7 @@
     "slug": "pickar",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/icon-pickar.png",
     "scheme": "pickar",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -20,7 +20,11 @@
       "splash": {
         "image": "./assets/images/splash-icon.png",
         "resizeMode": "contain",
-        "backgroundColor": "#8B1538"
+        "backgroundColor": "#8B1538",
+        "buildNumber": "1"
+      },
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {

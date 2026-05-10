@@ -2,7 +2,6 @@
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef } from 'react';
@@ -68,7 +67,7 @@ export default function SplashScreen() {
   const screenOpacity = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-      AsyncStorage.clear();
+    
     // Exact website timeline sequence
     const timeline = Animated.parallel([
       // 1. Bird stroke draws (0.3s delay, 1.6s duration)
@@ -151,9 +150,9 @@ export default function SplashScreen() {
         } else if (!isAuthenticated) {
           router.replace('/auth/register-choice');
         } else if (userType === 'user') {
-          router.replace('/(user)/(tabs)/home' as never);
+          router.replace('/user/(tabs)/home' as never);
         } else if (userType === 'driver') {
-          router.replace('/(driver)/(tabs)/home' as never);
+          router.replace('/driver/(tabs)/Home' as never);
         }
       }
     });

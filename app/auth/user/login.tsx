@@ -71,6 +71,7 @@ export default function UserLoginScreen() {
         password: formData.password,
         userType: 'user',
       });
+console.log('[Login response]', JSON.stringify(response));
 
       if (response.success && response.data) {
         // Update auth state

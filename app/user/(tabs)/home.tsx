@@ -1,756 +1,607 @@
-
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
 import api from '@/services/api';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Location from 'expo-location';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Dimensions,
   Image,
+  PanResponder,
+  Platform,
   Pressable,
-  RefreshControl,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
+import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 
-interface Delivery {
-  _id: string;
-  pickupAddress: {
-    label: string;
-    coordinates: { lat: number; lng: number };
-  };
-  recipient: {
-    address: {
-      label: string;
-      coordinates: { lat: number; lng: number };
-    };
-    name: string;
-    phone: string;
-  };
-  status: string;
-  price: number;
-  rideType?: string;
-  packageType: string;
-  createdAt: string;
-  estimatedArrival?: string;
-}
+// ─── Cloudinary config ────────────────────────────────────────────
+// Cloud name from your dashboard. Create an unsigned upload preset called
+// "pickar_profiles" in Cloudinary → Settings → Upload → Upload Presets
+const CLOUDINARY_CLOUD = 'dtr1shkje';
+const CLOUDINARY_PRESET = 'pickar_profiles'; // create this as unsigned preset
 
-interface WalletData {
-  balance: number;
-  currency: string;
-}
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+// Sheet snaps between two positions
+const SHEET_COLLAPSED = SCREEN_HEIGHT * 0.44; // map shows ~44%
+const SHEET_EXPANDED  = SCREEN_HEIGHT * 0.15; // map shows ~15% (almost full sheet)
+
+const MAP_STYLE = [
+  { elementType: 'geometry', stylers: [{ color: '#f3f4f6' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#6b7280' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#ffffff' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#ffffff' }] },
+  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#e5e7eb' }] },
+  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#f9fafb' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#bfdbfe' }] },
+  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+];
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { user } = useAuth();
-  const [showProfileBanner, setShowProfileBanner] = useState(true);
-  const [recentDeliveries, setRecentDeliveries] = useState<Delivery[]>([]);
-  const [wallet, setWallet] = useState<WalletData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const { user, setUser } = useAuth() as any;
+  const mapRef = useRef<MapView>(null);
 
-  // Fetch data from backend
-  const fetchData = async () => {
-    try {
-      // Fetch wallet balance
-      const walletResponse = await api.get('/wallet');
-      if (walletResponse.data.success) {
-        setWallet(walletResponse.data.data);
-      }
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [activeDelivery, setActiveDelivery] = useState<{ _id: string; status: string } | null>(null);
+  const [showPromoBanner, setShowPromoBanner] = useState(true);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
-      // Fetch recent deliveries
-      const deliveriesResponse = await api.get('/deliveries/history');
-      if (deliveriesResponse.data.success) {
-        setRecentDeliveries(deliveriesResponse.data.data);
-      }
-    } catch (error: any) {
-      console.error('Error fetching data:', error.response?.data || error.message);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
+const firstName = (user?.fullName || user?.name || 'there').split(' ')[0];
+  // ─── Draggable sheet animation ────────────────────────────────
+  // sheetTop tracks the Y position of the top of the gradient sheet
+  const sheetTop = useRef(new Animated.Value(SHEET_COLLAPSED)).current;
+  const lastSheetTop = useRef(SHEET_COLLAPSED);
 
-  // Load data when screen focuses
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, { dy }) => Math.abs(dy) > 5,
+      onPanResponderMove: (_, { dy }) => {
+        const next = lastSheetTop.current + dy;
+        // Clamp between expanded and a bottom limit
+        const clamped = Math.max(SHEET_EXPANDED, Math.min(SHEET_COLLAPSED, next));
+        sheetTop.setValue(clamped);
+      },
+      onPanResponderRelease: (_, { dy, vy }) => {
+        const destination = dy + vy * 80 < 0 ? SHEET_EXPANDED : SHEET_COLLAPSED;
+        lastSheetTop.current = destination;
+        Animated.spring(sheetTop, {
+          toValue: destination,
+          useNativeDriver: false,
+          tension: 60,
+          friction: 12,
+        }).start();
+      },
+    })
+  ).current;
+
+  // ─── Location ──────────────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
+      setUserLocation(coords);
+      mapRef.current?.animateToRegion({ ...coords, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 800);
+    })();
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
-      fetchData();
+      checkActiveDelivery();
     }, [])
   );
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchData();
-  };
-
-  const handleSendPackage = () => {
-    router.push('/user/send-package' as never);
-  };
-
-  const handleRebook = async (deliveryId: string) => {
+  const checkActiveDelivery = async () => {
     try {
-      const delivery = recentDeliveries.find(d => d._id === deliveryId);
-      if (!delivery) return;
-
-      router.push({
-        pathname: '/user/send-package',
-        params: {
-          pickupAddress: delivery.pickupAddress.label,
-          recipientAddress: delivery.recipient.address.label,
-        },
-      } as never);
-    } catch (error: any) {
-      Alert.alert('Error', error.response?.data?.message || 'Failed to rebook');
-    }
+      const { data } = await api.get('/deliveries/active');
+      setActiveDelivery(data.success && data.data ? data.data : null);
+    } catch (_) {}
   };
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    }) + ' at ' + date.toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-    });
-  };
-
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={Colors.primary} />
-        </View>
-      </SafeAreaView>
-    );
+  // ─── Cloudinary photo upload ───────────────────────────────────
+const handlePickAndUploadPhoto = async () => {
+  const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (status !== 'granted') {
+    Alert.alert('Permission needed', 'Please allow access to your photo library.');
+    return;
   }
 
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ImagePicker.MediaTypeOptions.Images,
+    allowsEditing: true,
+    aspect: [1, 1],
+    quality: 0.7,
+    // Remove base64: true — use URI instead, more reliable in React Native
+  });
+
+  if (result.canceled || !result.assets[0]?.uri) return;
+
+  setUploadingPhoto(true);
+  try {
+    const asset = result.assets[0];
+    const fileType = asset.mimeType ?? 'image/jpeg';
+    const fileName = asset.fileName ?? 'photo.jpg';
+
+    // Build FormData using the file URI — React Native handles this natively
+    const formData = new FormData();
+    formData.append('file', {
+      uri: asset.uri,
+      type: fileType,
+      name: fileName,
+    } as any);
+    formData.append('upload_preset', CLOUDINARY_PRESET);
+    formData.append('folder', 'pickar/profiles');
+
+    const res = await fetch(
+      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
+      {
+        method: 'POST',
+        body: formData,
+        headers: { 'Content-Type': 'multipart/form-data' },
+      }
+    );
+
+    const data = await res.json();
+    console.log('[Cloudinary]', JSON.stringify(data));
+
+    if (!data.secure_url) {
+      throw new Error(data.error?.message ?? 'Upload failed');
+    }
+
+    await api.patch('/users/me', { photo: data.secure_url });
+   setUser({ ...user, photo: data.secure_url });
+    Alert.alert('Success', 'Profile photo updated!');
+  } catch (err: any) {
+    console.error('[Photo Upload]', err);
+    Alert.alert('Error', err.message || 'Could not upload photo. Please try again.');
+  } finally {
+    setUploadingPhoto(false);
+  }
+};
+
+  // ─── Derived values ────────────────────────────────────────────
+  const hasPhoto = !!(user as any)?.photo;
+  const avatarUri = hasPhoto
+    ? (user as any).photo
+    : `https://ui-avatars.com/api/?name=${encodeURIComponent(user?.name || 'U')}&background=ffffff&color=861313&size=128&bold=true`;
+
+  const activeStatusText =
+    activeDelivery?.status === 'in_transit' ? 'Package on the way to recipient'
+    : activeDelivery?.status === 'driver_arrived' ? 'Driver is at your pickup location'
+    : activeDelivery?.status === 'driver_assigned' ? 'Driver is heading to you'
+    : 'Finding a driver...';
+
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
       <StatusBar style="dark" />
-      
-      <ScrollView 
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
+
+      {/* ── MAP (full screen behind sheet) ───────────────────── */}
+      <MapView
+        ref={mapRef}
+        style={StyleSheet.absoluteFillObject}
+        provider={PROVIDER_GOOGLE}
+        customMapStyle={MAP_STYLE}
+        showsCompass={false}
+        showsMyLocationButton={false}
+        toolbarEnabled={false}
+        rotateEnabled={false}
+        pitchEnabled={false}
+        initialRegion={{
+          latitude: 6.5244, longitude: 3.3792,
+          latitudeDelta: 0.012, longitudeDelta: 0.012,
+        }}
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <Pressable style={styles.profilePic}>
-              <Image
-                source={{ uri: 'https://ui-avatars.com/api/?name=' + (user?.name || 'User') + '&background=8B1538&color=fff&size=128' }}
-                style={styles.profileImage}
-              />
-            </Pressable>
-            <View>
-              <Text style={styles.greetingText}>Hello,</Text>
-              <Text style={styles.userName}>{user?.name || 'User'}</Text>
+        {/* ── Proper wine location pin ── */}
+        {userLocation && (
+          <Marker
+            coordinate={userLocation}
+            anchor={{ x: 0.5, y: 1 }}
+            tracksViewChanges={false}
+          >
+            <View style={styles.pinContainer}>
+              {/* Pin body */}
+              <View style={styles.pinBody}>
+                <View style={styles.pinInnerDot} />
+              </View>
+              {/* Pin shadow blob */}
+              <View style={styles.pinShadowBlob} />
             </View>
-          </View>
-          
-          <Pressable style={styles.notificationButton}>
-            <Ionicons name="notifications-outline" size={24} color={Colors.textPrimary} />
-            <View style={styles.notificationBadge}>
-              <Text style={styles.notificationBadgeText}>3</Text>
-            </View>
-          </Pressable>
+          </Marker>
+        )}
+      </MapView>
+
+      {/* Floating top bar */}
+      <View style={styles.mapTopBar}>
+        <View style={styles.logoBox}>
+          <Image
+            source={require('@/assets/images/logo.png')}
+            style={styles.logoImg}
+            resizeMode="contain"
+          />
+        </View>
+        <Pressable style={styles.notifBtn}>
+          <Ionicons name="notifications-outline" size={20} color={Colors.textPrimary} />
+          <View style={styles.notifDot} />
+        </Pressable>
+      </View>
+
+      {/* ── DRAGGABLE GRADIENT SHEET ───────────────────────────── */}
+      <Animated.View style={[styles.sheet, { top: sheetTop }]}>
+        <LinearGradient
+          colors={['#9B1515', '#3D0707']}
+          style={StyleSheet.absoluteFillObject}
+          start={{ x: 0.2, y: 0 }}
+          end={{ x: 0.8, y: 1 }}
+        />
+
+        {/* Drag handle — touch here to expand/collapse */}
+        <View {...panResponder.panHandlers} style={styles.dragHandleArea}>
+          <View style={styles.dragHandle} />
         </View>
 
-        {/* Profile Completion Banner */}
-        {showProfileBanner && (
-          <View style={styles.profileBanner}>
-            <View style={styles.profileBannerContent}>
-              <Ionicons name="information-circle" size={20} color="#F59E0B" style={styles.warningIcon} />
-              <View style={styles.profileBannerText}>
-                <Text style={styles.profileBannerTitle}>Complete your profile to continue</Text>
-                <Text style={styles.profileBannerSubtitle}>
-                  Verify your phone number and email address.
-                </Text>
-              </View>
-            </View>
-            <Pressable onPress={() => setShowProfileBanner(false)}>
-              <Ionicons name="close" size={20} color={Colors.textSecondary} />
-            </Pressable>
-          </View>
-        )}
-
-        {/* Wallet Balance Card */}
-        {wallet && (
-          <Pressable style={styles.walletCard} onPress={() => router.push('/wallet' as never)}>
-            <View style={styles.walletContent}>
-              <View>
-                <View style={styles.walletHeader}>
-                  <Text style={styles.walletLabel}>Wallet balance</Text>
-                  <Ionicons name="eye-outline" size={16} color={Colors.textSecondary} />
-                </View>
-                <Text style={styles.walletAmount}>
-                  ₦{wallet.balance.toLocaleString()}<Text style={styles.walletDecimal}>.00</Text>
-                </Text>
-              </View>
-              <Pressable style={styles.addFundButton}>
-                <Ionicons name="add" size={18} color={Colors.white} />
-                <Text style={styles.addFundText}>Add fund</Text>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+          bounces
+          // Don't steal touch from PanResponder when scrolled to top
+          scrollEventThrottle={16}
+        >
+          {/* ── HEADER ── */}
+          <View style={styles.headerRow}>
+            {/* Avatar — separate touch targets for profile nav vs camera */}
+            <View style={styles.avatarContainer}>
+              <Pressable
+                style={styles.avatarPressable}
+                onPress={() => router.push('/user/(tabs)/profile' as never)}
+              >
+                <Image source={{ uri: avatarUri }} style={styles.avatar} />
               </Pressable>
-            </View>
-          </Pressable>
-        )}
 
-        {/* Services */}
-        <View style={styles.servicesSection}>
-          <Text style={styles.sectionTitle}>Services</Text>
-          <View style={styles.servicesGrid}>
-            <Pressable style={styles.serviceCard} onPress={handleSendPackage}>
-              <View style={styles.serviceImageContainer}>
+              {/* Camera badge — opens image picker, does NOT navigate */}
+              <TouchableOpacity
+                style={styles.cameraBadge}
+                onPress={handlePickAndUploadPhoto}
+                disabled={uploadingPhoto}
+                hitSlop={{ top: 6, right: 6, bottom: 6, left: 6 }}
+              >
+                {uploadingPhoto
+                  ? <ActivityIndicator size={9} color="#fff" />
+                  : <Ionicons name="camera" size={10} color="#fff" />
+                }
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.greetingBlock}>
+              <Text style={styles.hiText}>Hi {firstName || 'there'}</Text>
+              <Text style={styles.subText}>Where would you like to deliver to?</Text>
+            </View>
+          </View>
+
+          {/* ── ACTIVE DELIVERY ── */}
+          {activeDelivery && (
+            <TouchableOpacity
+              style={styles.activeBanner}
+              onPress={() =>
+                router.push({
+                  pathname: '/user/finding-driver',
+                  params: { deliveryId: activeDelivery._id },
+                } as never)
+              }
+              activeOpacity={0.85}
+            >
+              <View style={styles.activePulseRing}>
+                <View style={styles.activePulseDot} />
+              </View>
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={styles.activeBannerTitle}>Delivery in progress</Text>
+                <Text style={styles.activeBannerSub}>{activeStatusText}</Text>
+              </View>
+              <View style={styles.activeBannerArrow}>
+                <Ionicons name="arrow-forward" size={16} color="#9B1515" />
+              </View>
+            </TouchableOpacity>
+          )}
+
+          {/* ── PROMO ── */}
+          {showPromoBanner && (
+            <View style={styles.promoBanner}>
+              <View style={styles.promoIconBox}>
+                <Ionicons name="pricetag" size={18} color="#fff" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={styles.promoPrimary}>40% off your first two rides</Text>
+                <Text style={styles.promoSecondary}>View details</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setShowPromoBanner(false)}
+                hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
+              >
+                <Ionicons name="close" size={18} color="rgba(255,255,255,0.5)" />
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* ── SERVICES ── */}
+          <Text style={styles.sectionTitle}>Our services</Text>
+          <View style={styles.servicesRow}>
+            <TouchableOpacity
+              style={styles.serviceCard}
+              onPress={() => router.push('/user/send-package' as never)}
+              activeOpacity={0.85}
+            >
+              <View style={styles.serviceImgContainer}>
                 <Image
                   source={require('@/assets/images/package.png')}
-                  style={styles.serviceImage}
+                  style={styles.serviceImg}
                   resizeMode="contain"
                 />
               </View>
-              <Text style={styles.serviceText}>Send a package</Text>
-            </Pressable>
+              <Text style={styles.serviceLabel}>Send a package</Text>
+            </TouchableOpacity>
 
-            <Pressable style={styles.serviceCard}>
-              <View style={styles.serviceImageContainer}>
+            <TouchableOpacity style={styles.serviceCard} activeOpacity={0.85}>
+              <View style={styles.serviceImgContainer}>
                 <Image
                   source={require('@/assets/images/bus-load.png')}
-                  style={styles.serviceImage}
+                  style={styles.serviceImg}
                   resizeMode="contain"
                 />
               </View>
-              <Text style={styles.serviceText}>Move your house loads</Text>
-            </Pressable>
+              <Text style={styles.serviceLabel}>Move your house loads</Text>
+            </TouchableOpacity>
           </View>
-        </View>
 
-        {/* Promotional Banner */}
-        <View style={styles.promoSection}>
-          <Text style={styles.sectionTitle}>Our offer for you</Text>
-          <View style={styles.promoCard}>
-            <View style={styles.promoContent}>
-              <Text style={styles.promoTitle}>
-                Enjoy 40% off{'\n'}your first two{'\n'}rides
-              </Text>
-              <Pressable style={styles.promoButton} onPress={handleSendPackage}>
-                <Text style={styles.promoButtonText}>Take a trip</Text>
-                <Ionicons name="arrow-forward" size={16} color={Colors.white} />
-              </Pressable>
+          {/* ── WALLET ── */}
+          <TouchableOpacity
+            style={styles.walletCard}
+            activeOpacity={0.85}
+            onPress={() => router.push('/user/(tabs)/profile' as never)}
+          >
+            <View style={styles.walletLeft}>
+              <View style={styles.walletIconCircle}>
+                <Ionicons name="wallet-outline" size={20} color="#9B1515" />
+              </View>
+              <View style={{ marginLeft: 14 }}>
+                <Text style={styles.walletTitle}>Pickar Wallet</Text>
+                <Text style={styles.walletSub}>Top up & manage your funds</Text>
+              </View>
             </View>
-            
-            <View style={styles.promoPercentageContainer}>
-              <Text style={styles.promoPercent}>%</Text>
-            </View>
-          </View>
-        </View>
+            <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.4)" />
+          </TouchableOpacity>
 
-        {/* Recent Deliveries */}
-        {recentDeliveries.length > 0 && (
-          <View style={styles.historySection}>
-            <View style={styles.historySectionHeader}>
-              <Text style={styles.sectionTitle}>Ride history</Text>
-              <Pressable onPress={() => router.push('/delivery-history' as never)}>
-                <Text style={styles.seeAllText}>See all</Text>
-              </Pressable>
-            </View>
-
-            {recentDeliveries.slice(0, 3).map((delivery) => {
-              return (
-                <View key={delivery._id} style={styles.historyCard}>
-                  {/* Map Preview */}
-                  <View style={styles.mapPreview}>
-                    <View style={styles.mapPlaceholder}>
-                      <View style={styles.routeLine} />
-                      
-                      <View style={styles.startMarker}>
-                        <Ionicons name="person" size={16} color={Colors.primary} />
-                      </View>
-                      
-                      <View style={styles.endMarker}>
-                        <Ionicons name="cube" size={16} color={Colors.textSecondary} />
-                        <Text style={styles.distanceText}>5.2 km</Text>
-                      </View>
-                      
-                      <View style={styles.deliveryTimeBadge}>
-                        <Ionicons name="person" size={12} color={Colors.textSecondary} />
-                        <Text style={styles.deliveryTimeText}>Delivered in 15 mins</Text>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* Delivery Footer */}
-                  <View style={styles.deliveryFooter}>
-                    <View style={styles.deliveryFooterLeft}>
-                      <View style={styles.bikeIconContainer}>
-                        <Ionicons name="bicycle" size={20} color={Colors.primary} />
-                      </View>
-                      <View style={styles.deliveryFooterInfo}>
-                        <Text style={styles.deliveryAddress} numberOfLines={1}>
-                          {delivery.recipient?.address?.label || 'Unknown location'}
-                        </Text>
-                        <Text style={styles.deliveryDate}>
-                          {formatDate(delivery.createdAt)} · ₦{delivery.price.toLocaleString()}
-                        </Text>
-                      </View>
-                    </View>
-                    
-                    {delivery.status === 'delivered' && (
-                      <Pressable 
-                        style={styles.rebookButton}
-                        onPress={() => handleRebook(delivery._id)}
-                      >
-                        <Ionicons name="refresh" size={16} color={Colors.primary} />
-                        <Text style={styles.rebookText}>Rebook</Text>
-                      </Pressable>
-                    )}
-                  </View>
-                </View>
-              );
-            })}
-          </View>
-        )}
-
-        {/* Empty State */}
-        {recentDeliveries.length === 0 && (
-          <View style={styles.emptyState}>
-            <Ionicons name="cube-outline" size={64} color={Colors.textSecondary} />
-            <Text style={styles.emptyStateTitle}>No deliveries yet</Text>
-            <Text style={styles.emptyStateSubtitle}>
-              Send your first package to get started
-            </Text>
-            <Pressable style={styles.emptyStateButton} onPress={handleSendPackage}>
-              <Text style={styles.emptyStateButtonText}>Send Package</Text>
-            </Pressable>
-          </View>
-        )}
-      </ScrollView>
-    </SafeAreaView>
+          <View style={{ height: 32 }} />
+        </ScrollView>
+      </Animated.View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F9FAFB',
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  scrollContent: {
-    paddingBottom: 20,
-  },
-  
-  // Header
-  header: {
+  container: { flex: 1, backgroundColor: '#3D0707' },
+
+  // ── Map top bar ───────────────────────────────────────────────
+  mapTopBar: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 56 : 36,
+    left: 16, right: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
+    zIndex: 10,
   },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  profilePic: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    overflow: 'hidden',
-    marginRight: 12,
-    borderWidth: 2,
-    borderColor: Colors.primary,
-  },
-  profileImage: {
-    width: '100%',
-    height: '100%',
-  },
-  greetingText: {
-    fontSize: 14,
-    fontFamily: Fonts.poppins.regular,
-    color: Colors.textSecondary,
-  },
-  userName: {
-    fontSize: 16,
-    fontFamily: Fonts.poppins.semiBold,
-    color: Colors.textPrimary,
-  },
-  notificationButton: {
-    position: 'relative',
-  },
-  notificationBadge: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    backgroundColor: Colors.error,
-    borderRadius: 10,
-    width: 18,
-    height: 18,
+  logoBox: {
+    height: 36, backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: 20, paddingHorizontal: 14,
     justifyContent: 'center',
-    alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1, shadowRadius: 4, elevation: 4,
   },
-  notificationBadgeText: {
-    color: Colors.white,
-    fontSize: 10,
-    fontFamily: Fonts.poppins.bold,
+  logoImg: { height: 22, width: 80 },
+  notifBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1, shadowRadius: 4, elevation: 4,
+  },
+  notifDot: {
+    position: 'absolute', top: 8, right: 8,
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: Colors.primary, borderWidth: 1.5, borderColor: '#fff',
   },
 
-  // Profile Banner
-  profileBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: '#FEF3C7',
-    marginHorizontal: 20,
-    marginTop: 16,
-    padding: 16,
-    borderRadius: 12,
+  // ── Location pin ──────────────────────────────────────────────
+  pinContainer: { alignItems: 'center' },
+  pinBody: {
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: Colors.primary,
+    borderWidth: 3, borderColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    // Teardrop shape via bottom border radius override
+    borderBottomLeftRadius: 2,
+    borderBottomRightRadius: 2,
+    shadowColor: Colors.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5, shadowRadius: 6, elevation: 8,
+    transform: [{ rotate: '45deg' }],
   },
-  profileBannerContent: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
+  pinInnerDot: {
+    width: 9, height: 9, borderRadius: 4.5,
+    backgroundColor: '#fff',
+    transform: [{ rotate: '-45deg' }],
   },
-  warningIcon: {
-    marginRight: 12,
+  pinShadowBlob: {
+    width: 14, height: 6, borderRadius: 7,
+    backgroundColor: 'rgba(134,19,19,0.25)',
     marginTop: 2,
   },
-  profileBannerText: {
-    flex: 1,
+
+  // ── Draggable gradient sheet ──────────────────────────────────
+  sheet: {
+    position: 'absolute',
+    left: 0, right: 0, bottom: 0,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    overflow: 'hidden',
   },
-  profileBannerTitle: {
-    fontSize: 14,
-    fontFamily: Fonts.poppins.semiBold,
-    color: Colors.textPrimary,
-    marginBottom: 2,
+  dragHandleArea: {
+    alignItems: 'center',
+    paddingTop: 12, paddingBottom: 4,
+    paddingHorizontal: 60,
   },
-  profileBannerSubtitle: {
-    fontSize: 12,
-    fontFamily: Fonts.poppins.regular,
-    color: Colors.textSecondary,
+  dragHandle: {
+    width: 40, height: 4,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    borderRadius: 2,
+  },
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 16,
   },
 
-  // Wallet Card
-  walletCard: {
-    backgroundColor: Colors.white,
-    marginHorizontal: 20,
-    marginTop: 20,
-    borderRadius: 12,
-    padding: 20,
+  // ── Header ───────────────────────────────────────────────────
+  headerRow: {
+    flexDirection: 'row', alignItems: 'center',
+    marginBottom: 18,
   },
-  walletContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  avatarContainer: {
+    width: 52, height: 52,
+    marginRight: 14,
+    position: 'relative',
   },
-  walletHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
+  avatarPressable: {
+    width: 52, height: 52, borderRadius: 26,
+    overflow: 'hidden',
+    borderWidth: 2.5, borderColor: 'rgba(255,255,255,0.35)',
   },
-  walletLabel: {
-    fontSize: 14,
-    fontFamily: Fonts.poppins.regular,
-    color: Colors.textSecondary,
-    marginRight: 6,
-  },
-  walletAmount: {
-    fontSize: 32,
-    fontFamily: Fonts.poppins.bold,
-    color: Colors.textPrimary,
-  },
-  walletDecimal: {
-    fontSize: 20,
-    fontFamily: Fonts.poppins.regular,
-  },
-  addFundButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  avatar: { width: '100%', height: '100%' },
+  cameraBadge: {
+    position: 'absolute', bottom: 0, right: -2,
+    width: 20, height: 20, borderRadius: 10,
     backgroundColor: Colors.primary,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-    gap: 4,
+    borderWidth: 2, borderColor: '#9B1515',
+    alignItems: 'center', justifyContent: 'center',
+    zIndex: 1,
   },
-  addFundText: {
-    color: Colors.white,
-    fontSize: 14,
+  greetingBlock: { flex: 1 },
+  hiText: {
     fontFamily: Fonts.poppins.semiBold,
+    fontSize: 18, color: '#fff',
+  },
+  subText: {
+    fontFamily: Fonts.poppins.regular,
+    fontSize: 12, color: 'rgba(255,255,255,0.6)',
+    marginTop: 1,
   },
 
-  // Services
-  servicesSection: {
-    marginTop: 24,
-    paddingHorizontal: 20,
+  // ── Active delivery ───────────────────────────────────────────
+  activeBanner: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#fff', borderRadius: 16, padding: 14,
+    marginBottom: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15, shadowRadius: 10, elevation: 6,
   },
+  activePulseRing: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: 'rgba(155,21,21,0.12)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  activePulseDot: {
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: Colors.primary,
+  },
+  activeBannerTitle: {
+    fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.textPrimary,
+  },
+  activeBannerSub: {
+    fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginTop: 1,
+  },
+  activeBannerArrow: {
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: 'rgba(155,21,21,0.1)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  // ── Promo ─────────────────────────────────────────────────────
+  promoBanner: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 14, padding: 14, marginBottom: 22,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
+  },
+  promoIconBox: {
+    width: 38, height: 38, borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  promoPrimary: {
+    fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: '#fff',
+  },
+  promoSecondary: {
+    fontFamily: Fonts.poppins.regular, fontSize: 11,
+    color: 'rgba(255,255,255,0.55)', marginTop: 1, textDecorationLine: 'underline',
+  },
+
+  // ── Section title ─────────────────────────────────────────────
   sectionTitle: {
-    fontSize: 16,
     fontFamily: Fonts.poppins.semiBold,
-    color: Colors.textPrimary,
-    marginBottom: 12,
+    fontSize: 14, color: 'rgba(255,255,255,0.7)',
+    letterSpacing: 1, textTransform: 'uppercase', marginBottom: 14,
   },
-  servicesGrid: {
-    flexDirection: 'row',
-    gap: 16,
-  },
+
+  // ── Service cards ─────────────────────────────────────────────
+  servicesRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
   serviceCard: {
-    flex: 1,
-    alignItems: 'center',
-    backgroundColor: Colors.lightGray,
-    padding: 20,
-    borderRadius: 12,
+    flex: 1, backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 20, overflow: 'hidden', paddingBottom: 16,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12, shadowRadius: 8, elevation: 4,
   },
-  serviceImageContainer: {
-    width: 60,
-    height: 60,
-    marginBottom: 12,
+  serviceImgContainer: {
+    width: '100%', height: 130,
+    alignItems: 'center', justifyContent: 'center',
+    paddingTop: 16, paddingHorizontal: 12,
   },
-  serviceImage: {
-    width: '100%',
-    height: '100%',
-  },
-  serviceText: {
-    fontSize: 12,
-    fontFamily: Fonts.poppins.medium,
-    color: Colors.textPrimary,
-    textAlign: 'center',
+  serviceImg: { width: '100%', height: '100%' },
+  serviceLabel: {
+    fontFamily: Fonts.poppins.medium, fontSize: 13,
+    color: "#fff", textAlign: 'center', paddingHorizontal: 10, marginTop: 6,
   },
 
-  // Promo
-  promoSection: {
-    marginTop: 24,
-    paddingHorizontal: 20,
+  // ── Wallet ────────────────────────────────────────────────────
+  walletCard: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 18, padding: 16,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
   },
-  promoCard: {
-    backgroundColor: '#7C1D1D',
-    borderRadius: 16,
-    padding: 24,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    overflow: 'hidden',
-    position: 'relative',
-    minHeight: 140,
+  walletLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  walletIconCircle: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center',
   },
-  promoContent: {
-    flex: 1,
-    zIndex: 2,
+  walletTitle: {
+    fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: '#fff', marginLeft: 14,
   },
-  promoTitle: {
-    fontSize: 20,
-    fontFamily: Fonts.poppins.bold,
-    color: Colors.white,
-    marginBottom: 16,
-    lineHeight: 28,
-  },
-  promoButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  promoButtonText: {
-    color: Colors.white,
-    fontSize: 14,
-    fontFamily: Fonts.poppins.medium,
-  },
-  promoPercentageContainer: {
-    position: 'absolute',
-    right: -30,
-    top: -10,
-    bottom: -10,
-    justifyContent: 'center',
-    opacity: 0.25,
-  },
-  promoPercent: {
-    fontSize: 140,
-    fontFamily: Fonts.poppins.bold,
-    color: '#EF4444',
-    lineHeight: 140,
-  },
-
-  // History
-  historySection: {
-    marginTop: 24,
-    paddingHorizontal: 20,
-  },
-  historySectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  seeAllText: {
-    fontSize: 14,
-    fontFamily: Fonts.poppins.medium,
-    color: Colors.primary,
-  },
-  historyCard: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    overflow: 'hidden',
-    backgroundColor: Colors.white,
-    marginBottom: 12,
-  },
-  mapPreview: {
-    height: 200,
-    backgroundColor: '#F3F4F6',
-  },
-  mapPlaceholder: {
-    flex: 1,
-    position: 'relative',
-  },
-  routeLine: {
-    position: 'absolute',
-    left: '20%',
-    bottom: '25%',
-    width: '50%',
-    height: 2,
-    backgroundColor: Colors.textSecondary,
-    borderStyle: 'dashed',
-    borderWidth: 1,
-    borderColor: Colors.textSecondary,
-    transform: [{ rotate: '35deg' }],
-  },
-  startMarker: {
-    position: 'absolute',
-    left: 40,
-    bottom: 50,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: Colors.white,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: Colors.primary,
-  },
-  endMarker: {
-    position: 'absolute',
-    right: 40,
-    top: 50,
-    backgroundColor: Colors.white,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  distanceText: {
-    fontSize: 11,
-    fontFamily: Fonts.poppins.semiBold,
-    color: Colors.textPrimary,
-  },
-  deliveryTimeBadge: {
-    position: 'absolute',
-    bottom: 16,
-    left: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: Colors.white,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  deliveryTimeText: {
-    fontSize: 12,
-    fontFamily: Fonts.poppins.regular,
-    color: Colors.textSecondary,
-  },
-  deliveryFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-  },
-  deliveryFooterLeft: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  bikeIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: Colors.lightGray,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  deliveryFooterInfo: {
-    flex: 1,
-  },
-  deliveryAddress: {
-    fontSize: 14,
-    fontFamily: Fonts.poppins.medium,
-    color: Colors.textPrimary,
-    marginBottom: 2,
-  },
-  deliveryDate: {
-    fontSize: 12,
-    fontFamily: Fonts.poppins.regular,
-    color: Colors.textSecondary,
-  },
-  rebookButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: Colors.primary,
-  },
-  rebookText: {
-    fontSize: 12,
-    fontFamily: Fonts.poppins.medium,
-    color: Colors.primary,
-  },
-
-  // Empty State
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    marginHorizontal: 20,
-  },
-  emptyStateTitle: {
-    fontSize: 18,
-    fontFamily: Fonts.poppins.semiBold,
-    color: Colors.textPrimary,
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyStateSubtitle: {
-    fontSize: 14,
-    fontFamily: Fonts.poppins.regular,
-    color: Colors.textSecondary,
-    textAlign: 'center',
-    marginBottom: 24,
-  },
-  emptyStateButton: {
-    backgroundColor: Colors.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 12,
-  },
-  emptyStateButtonText: {
-    color: Colors.white,
-    fontSize: 14,
-    fontFamily: Fonts.poppins.semiBold,
+  walletSub: {
+    fontFamily: Fonts.poppins.regular, fontSize: 11,
+    color: 'rgba(255,255,255,0.5)', marginTop: 2, marginLeft: 14,
   },
 });

@@ -10,16 +10,16 @@ import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import {
-    Alert,
-    Animated,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    SafeAreaView,
-    ScrollView,
-    StyleSheet,
-    Text,
-    View,
+  Alert,
+  Animated,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
 
 export default function DriverLoginScreen() {
@@ -84,7 +84,7 @@ export default function DriverLoginScreen() {
         });
 
         // Navigate to driver home
-        router.replace('/(driver)/(tabs)/home' as never);
+        router.replace('/driver/(tabs)/Home' as never);
       }
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Login failed');

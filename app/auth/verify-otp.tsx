@@ -78,7 +78,7 @@ export default function VerifyOTPScreen() {
         if (userType === 'user') {
           router.replace('/user/(tabs)/home' as never);
         } else {
-          router.replace('/driver/(tabs)/home' as never);
+          router.replace('/driver/(tabs)/Home' as never);
         }
       }
     } catch (error: any) {
