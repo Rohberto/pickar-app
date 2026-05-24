@@ -4,6 +4,7 @@ import Input from '@/components/ui/input';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
+import api from '@/services/api';
 import authService from '@/services/authService';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -21,6 +22,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { registerForPushNotifications } from '../../../services/notificationService';
 
 export default function UserLoginScreen() {
   const router = useRouter();
@@ -77,13 +79,17 @@ console.log('[Login response]', JSON.stringify(response));
         // Update auth state
         await setUserType('user');
         await setAuthenticated(true);
-        setUser({
-          id: response.data.user.id,
-          name: response.data.user.fullName,
-          email: response.data.user.email,
-          type: 'user',
-        });
-
+          setUser({
+            id: response.data.user.id,
+            name: response.data.user.fullName,
+            email: response.data.user.email,
+            phone: response.data.user.phone,
+            type: 'user',
+          });
+        const token = await registerForPushNotifications();
+        if (token) {
+          api.patch('/users/push-token', { token }).catch(() => {});
+        }
         // Navigate to home
         router.replace('/user/(tabs)/home' as never);
       }

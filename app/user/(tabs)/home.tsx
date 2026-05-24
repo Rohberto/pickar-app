@@ -26,16 +26,12 @@ import {
 } from 'react-native';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 
-// ─── Cloudinary config ────────────────────────────────────────────
-// Cloud name from your dashboard. Create an unsigned upload preset called
-// "pickar_profiles" in Cloudinary → Settings → Upload → Upload Presets
 const CLOUDINARY_CLOUD = 'dtr1shkje';
-const CLOUDINARY_PRESET = 'pickar_profiles'; // create this as unsigned preset
+const CLOUDINARY_PRESET = 'pickar_profiles';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
-// Sheet snaps between two positions
-const SHEET_COLLAPSED = SCREEN_HEIGHT * 0.44; // map shows ~44%
-const SHEET_EXPANDED  = SCREEN_HEIGHT * 0.15; // map shows ~15% (almost full sheet)
+const SHEET_COLLAPSED = SCREEN_HEIGHT * 0.44;
+const SHEET_EXPANDED  = SCREEN_HEIGHT * 0.15;
 
 const MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#f3f4f6' }] },
@@ -58,10 +54,12 @@ export default function HomeScreen() {
   const [activeDelivery, setActiveDelivery] = useState<{ _id: string; status: string } | null>(null);
   const [showPromoBanner, setShowPromoBanner] = useState(true);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
 
-const firstName = (user?.fullName || user?.name || 'there').split(' ')[0];
-  // ─── Draggable sheet animation ────────────────────────────────
-  // sheetTop tracks the Y position of the top of the gradient sheet
+  const firstName = (user?.fullName || user?.name || 'there').split(' ')[0];
+
+  // ─── Draggable sheet ─────────────────────────────────────────
   const sheetTop = useRef(new Animated.Value(SHEET_COLLAPSED)).current;
   const lastSheetTop = useRef(SHEET_COLLAPSED);
 
@@ -71,7 +69,6 @@ const firstName = (user?.fullName || user?.name || 'there').split(' ')[0];
       onMoveShouldSetPanResponder: (_, { dy }) => Math.abs(dy) > 5,
       onPanResponderMove: (_, { dy }) => {
         const next = lastSheetTop.current + dy;
-        // Clamp between expanded and a bottom limit
         const clamped = Math.max(SHEET_EXPANDED, Math.min(SHEET_COLLAPSED, next));
         sheetTop.setValue(clamped);
       },
@@ -88,21 +85,58 @@ const firstName = (user?.fullName || user?.name || 'there').split(' ')[0];
     })
   ).current;
 
-  // ─── Location ──────────────────────────────────────────────────
+  // ─── Animate map only when both ready ────────────────────────
+  useEffect(() => {
+    if (mapReady && userLocation) {
+      mapRef.current?.animateToRegion(
+        { ...userLocation, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+        800
+      );
+    }
+  }, [mapReady, userLocation]);
+
+  // ─── Location ────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
-      setUserLocation(coords);
-      mapRef.current?.animateToRegion({ ...coords, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 800);
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      setUserLocation({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+      });
     })();
   }, []);
 
+  // ─── Fetch profile + wallet on mount ─────────────────────────
+  useEffect(() => {
+    fetchUserProfile();
+    fetchWallet();
+  }, []);
+
+  const fetchUserProfile = async () => {
+    try {
+      const { data } = await api.get('/users/me');
+      if (data.success && data.data?.photo && data.data.photo !== user?.photo) {
+        setUser({ ...user, photo: data.data.photo });
+      }
+    } catch (_) {}
+  };
+
+  const fetchWallet = async () => {
+    try {
+      const { data } = await api.get('/wallet');
+      if (data.success) setWalletBalance(data.data.balance ?? 0);
+    } catch (_) {}
+  };
+
+  // Refresh wallet balance whenever screen comes into focus
   useFocusEffect(
     useCallback(() => {
       checkActiveDelivery();
+      fetchWallet();
     }, [])
   );
 
@@ -113,86 +147,76 @@ const firstName = (user?.fullName || user?.name || 'there').split(' ')[0];
     } catch (_) {}
   };
 
-  // ─── Cloudinary photo upload ───────────────────────────────────
-const handlePickAndUploadPhoto = async () => {
-  const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (status !== 'granted') {
-    Alert.alert('Permission needed', 'Please allow access to your photo library.');
-    return;
-  }
-
-  const result = await ImagePicker.launchImageLibraryAsync({
-    mediaTypes: ImagePicker.MediaTypeOptions.Images,
-    allowsEditing: true,
-    aspect: [1, 1],
-    quality: 0.7,
-    // Remove base64: true — use URI instead, more reliable in React Native
-  });
-
-  if (result.canceled || !result.assets[0]?.uri) return;
-
-  setUploadingPhoto(true);
-  try {
-    const asset = result.assets[0];
-    const fileType = asset.mimeType ?? 'image/jpeg';
-    const fileName = asset.fileName ?? 'photo.jpg';
-
-    // Build FormData using the file URI — React Native handles this natively
-    const formData = new FormData();
-    formData.append('file', {
-      uri: asset.uri,
-      type: fileType,
-      name: fileName,
-    } as any);
-    formData.append('upload_preset', CLOUDINARY_PRESET);
-    formData.append('folder', 'pickar/profiles');
-
-    const res = await fetch(
-      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
-      {
-        method: 'POST',
-        body: formData,
-        headers: { 'Content-Type': 'multipart/form-data' },
-      }
-    );
-
-    const data = await res.json();
-    console.log('[Cloudinary]', JSON.stringify(data));
-
-    if (!data.secure_url) {
-      throw new Error(data.error?.message ?? 'Upload failed');
+  // ─── Cloudinary photo upload ──────────────────────────────────
+  const handlePickAndUploadPhoto = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Please allow access to your photo library.');
+      return;
     }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.7,
+    });
+    if (result.canceled || !result.assets[0]?.uri) return;
 
-    await api.patch('/users/me', { photo: data.secure_url });
-   setUser({ ...user, photo: data.secure_url });
-    Alert.alert('Success', 'Profile photo updated!');
-  } catch (err: any) {
-    console.error('[Photo Upload]', err);
-    Alert.alert('Error', err.message || 'Could not upload photo. Please try again.');
-  } finally {
-    setUploadingPhoto(false);
-  }
-};
+    setUploadingPhoto(true);
+    try {
+      const asset = result.assets[0];
+      const formData = new FormData();
+      formData.append('file', {
+        uri: asset.uri,
+        type: asset.mimeType ?? 'image/jpeg',
+        name: asset.fileName ?? 'photo.jpg',
+      } as any);
+      formData.append('upload_preset', CLOUDINARY_PRESET);
+      formData.append('folder', 'pickar/profiles');
 
-  // ─── Derived values ────────────────────────────────────────────
+      const res = await fetch(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
+        { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } }
+      );
+      const data = await res.json();
+      if (!data.secure_url) throw new Error(data.error?.message ?? 'Upload failed');
+
+      await api.patch('/users/me', { photo: data.secure_url });
+      setUser({ ...user, photo: data.secure_url });
+      Alert.alert('Success', 'Profile photo updated!');
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Could not upload photo. Please try again.');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  // ─── Derived ──────────────────────────────────────────────────
   const hasPhoto = !!(user as any)?.photo;
   const avatarUri = hasPhoto
     ? (user as any).photo
-    : `https://ui-avatars.com/api/?name=${encodeURIComponent(user?.name || 'U')}&background=ffffff&color=861313&size=128&bold=true`;
+    : `https://ui-avatars.com/api/?name=${encodeURIComponent(
+        user?.fullName || user?.name || 'U'
+      )}&background=ffffff&color=861313&size=128&bold=true`;
 
   const activeStatusText =
-    activeDelivery?.status === 'in_transit' ? 'Package on the way to recipient'
-    : activeDelivery?.status === 'driver_arrived' ? 'Driver is at your pickup location'
+    activeDelivery?.status === 'in_transit'       ? 'Package on the way to recipient'
+    : activeDelivery?.status === 'driver_arrived'  ? 'Driver is at your pickup location'
     : activeDelivery?.status === 'driver_assigned' ? 'Driver is heading to you'
     : 'Finding a driver...';
+
+  const balanceLabel = walletBalance !== null
+    ? `₦${walletBalance.toLocaleString()}`
+    : '---';
 
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
 
-      {/* ── MAP (full screen behind sheet) ───────────────────── */}
+      {/* ── MAP ──────────────────────────────────────────────── */}
       <MapView
         ref={mapRef}
+        onMapReady={() => setMapReady(true)}
         style={StyleSheet.absoluteFillObject}
         provider={PROVIDER_GOOGLE}
         customMapStyle={MAP_STYLE}
@@ -206,41 +230,38 @@ const handlePickAndUploadPhoto = async () => {
           latitudeDelta: 0.012, longitudeDelta: 0.012,
         }}
       >
-        {/* ── Proper wine location pin ── */}
         {userLocation && (
-          <Marker
-            coordinate={userLocation}
-            anchor={{ x: 0.5, y: 1 }}
-            tracksViewChanges={false}
-          >
+          <Marker coordinate={userLocation} anchor={{ x: 0.5, y: 1 }} tracksViewChanges={false}>
             <View style={styles.pinContainer}>
-              {/* Pin body */}
               <View style={styles.pinBody}>
                 <View style={styles.pinInnerDot} />
               </View>
-              {/* Pin shadow blob */}
               <View style={styles.pinShadowBlob} />
             </View>
           </Marker>
         )}
       </MapView>
 
-      {/* Floating top bar */}
+      {/* ── FLOATING TOP BAR ─────────────────────────────────── */}
       <View style={styles.mapTopBar}>
-        <View style={styles.logoBox}>
-          <Image
-            source={require('@/assets/images/logo.png')}
-            style={styles.logoImg}
-            resizeMode="contain"
-          />
-        </View>
-        <Pressable style={styles.notifBtn}>
+        {/* Left — wallet balance pill (where logo was) */}
+        <TouchableOpacity
+          style={styles.walletPill}
+          onPress={() => router.push('/user/(tabs)/wallet' as never)}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="wallet-outline" size={14} color={Colors.primary} />
+          <Text style={styles.walletPillText}>{balanceLabel}</Text>
+        </TouchableOpacity>
+
+        {/* Right — notification bell (stays where it was) */}
+        <TouchableOpacity style={styles.notifBtn}>
           <Ionicons name="notifications-outline" size={20} color={Colors.textPrimary} />
           <View style={styles.notifDot} />
-        </Pressable>
+        </TouchableOpacity>
       </View>
 
-      {/* ── DRAGGABLE GRADIENT SHEET ───────────────────────────── */}
+      {/* ── DRAGGABLE GRADIENT SHEET ──────────────────────────── */}
       <Animated.View style={[styles.sheet, { top: sheetTop }]}>
         <LinearGradient
           colors={['#9B1515', '#3D0707']}
@@ -249,7 +270,6 @@ const handlePickAndUploadPhoto = async () => {
           end={{ x: 0.8, y: 1 }}
         />
 
-        {/* Drag handle — touch here to expand/collapse */}
         <View {...panResponder.panHandlers} style={styles.dragHandleArea}>
           <View style={styles.dragHandle} />
         </View>
@@ -258,21 +278,17 @@ const handlePickAndUploadPhoto = async () => {
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
           bounces
-          // Don't steal touch from PanResponder when scrolled to top
           scrollEventThrottle={16}
         >
           {/* ── HEADER ── */}
           <View style={styles.headerRow}>
-            {/* Avatar — separate touch targets for profile nav vs camera */}
             <View style={styles.avatarContainer}>
               <Pressable
                 style={styles.avatarPressable}
-                onPress={() => router.push('/user/(tabs)/profile' as never)}
+                onPress={() => router.push('/user/(tabs)/account' as never)}
               >
                 <Image source={{ uri: avatarUri }} style={styles.avatar} />
               </Pressable>
-
-              {/* Camera badge — opens image picker, does NOT navigate */}
               <TouchableOpacity
                 style={styles.cameraBadge}
                 onPress={handlePickAndUploadPhoto}
@@ -285,9 +301,8 @@ const handlePickAndUploadPhoto = async () => {
                 }
               </TouchableOpacity>
             </View>
-
             <View style={styles.greetingBlock}>
-              <Text style={styles.hiText}>Hi {firstName || 'there'}</Text>
+              <Text style={styles.hiText}>Hi {firstName}</Text>
               <Text style={styles.subText}>Where would you like to deliver to?</Text>
             </View>
           </View>
@@ -346,7 +361,7 @@ const handlePickAndUploadPhoto = async () => {
             >
               <View style={styles.serviceImgContainer}>
                 <Image
-                  source={require('@/assets/images/package.png')}
+                  source={require('@/assets/images/bike.png')}
                   style={styles.serviceImg}
                   resizeMode="contain"
                 />
@@ -357,7 +372,7 @@ const handlePickAndUploadPhoto = async () => {
             <TouchableOpacity style={styles.serviceCard} activeOpacity={0.85}>
               <View style={styles.serviceImgContainer}>
                 <Image
-                  source={require('@/assets/images/bus-load.png')}
+                  source={require('@/assets/images/bus.png')}
                   style={styles.serviceImg}
                   resizeMode="contain"
                 />
@@ -366,19 +381,19 @@ const handlePickAndUploadPhoto = async () => {
             </TouchableOpacity>
           </View>
 
-          {/* ── WALLET ── */}
+          {/* ── RIDE HISTORY (replaces wallet card) ── */}
           <TouchableOpacity
-            style={styles.walletCard}
+            style={styles.historyCard}
             activeOpacity={0.85}
-            onPress={() => router.push('/user/(tabs)/profile' as never)}
+            onPress={() => router.push('/user/ride-history' as never)}
           >
-            <View style={styles.walletLeft}>
-              <View style={styles.walletIconCircle}>
-                <Ionicons name="wallet-outline" size={20} color="#9B1515" />
+            <View style={styles.historyLeft}>
+              <View style={styles.historyIconCircle}>
+                <Ionicons name="time-outline" size={20} color="#9B1515" />
               </View>
               <View style={{ marginLeft: 14 }}>
-                <Text style={styles.walletTitle}>Pickar Wallet</Text>
-                <Text style={styles.walletSub}>Top up & manage your funds</Text>
+                <Text style={styles.historyTitle}>Ride History</Text>
+                <Text style={styles.historySub}>View all your past deliveries</Text>
               </View>
             </View>
             <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.4)" />
@@ -394,24 +409,25 @@ const handlePickAndUploadPhoto = async () => {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#3D0707' },
 
-  // ── Map top bar ───────────────────────────────────────────────
   mapTopBar: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 56 : 36,
     left: 16, right: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     zIndex: 10,
   },
-  logoBox: {
-    height: 36, backgroundColor: 'rgba(255,255,255,0.92)',
-    borderRadius: 20, paddingHorizontal: 14,
-    justifyContent: 'center',
+
+  walletPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: 20, paddingHorizontal: 14, height: 36,
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1, shadowRadius: 4, elevation: 4,
   },
-  logoImg: { height: 22, width: 80 },
+  walletPillText: {
+    fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.primary,
+  },
+
   notifBtn: {
     width: 40, height: 40, borderRadius: 20,
     backgroundColor: 'rgba(255,255,255,0.92)',
@@ -425,121 +441,75 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.primary, borderWidth: 1.5, borderColor: '#fff',
   },
 
-  // ── Location pin ──────────────────────────────────────────────
   pinContainer: { alignItems: 'center' },
   pinBody: {
     width: 30, height: 30, borderRadius: 15,
-    backgroundColor: Colors.primary,
-    borderWidth: 3, borderColor: '#fff',
+    backgroundColor: Colors.primary, borderWidth: 3, borderColor: '#fff',
     alignItems: 'center', justifyContent: 'center',
-    // Teardrop shape via bottom border radius override
-    borderBottomLeftRadius: 2,
-    borderBottomRightRadius: 2,
-    shadowColor: Colors.primary,
-    shadowOffset: { width: 0, height: 4 },
+    borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
+    shadowColor: Colors.primary, shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.5, shadowRadius: 6, elevation: 8,
     transform: [{ rotate: '45deg' }],
   },
   pinInnerDot: {
     width: 9, height: 9, borderRadius: 4.5,
-    backgroundColor: '#fff',
-    transform: [{ rotate: '-45deg' }],
+    backgroundColor: '#fff', transform: [{ rotate: '-45deg' }],
   },
   pinShadowBlob: {
     width: 14, height: 6, borderRadius: 7,
-    backgroundColor: 'rgba(134,19,19,0.25)',
-    marginTop: 2,
+    backgroundColor: 'rgba(134,19,19,0.25)', marginTop: 2,
   },
 
-  // ── Draggable gradient sheet ──────────────────────────────────
   sheet: {
-    position: 'absolute',
-    left: 0, right: 0, bottom: 0,
-    borderTopLeftRadius: 26,
-    borderTopRightRadius: 26,
-    overflow: 'hidden',
+    position: 'absolute', left: 0, right: 0, bottom: 0,
+    borderTopLeftRadius: 26, borderTopRightRadius: 26, overflow: 'hidden',
   },
   dragHandleArea: {
-    alignItems: 'center',
-    paddingTop: 12, paddingBottom: 4,
-    paddingHorizontal: 60,
+    alignItems: 'center', paddingTop: 12, paddingBottom: 4, paddingHorizontal: 60,
   },
   dragHandle: {
-    width: 40, height: 4,
-    backgroundColor: 'rgba(255,255,255,0.3)',
-    borderRadius: 2,
+    width: 40, height: 4, backgroundColor: 'rgba(255,255,255,0.3)', borderRadius: 2,
   },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: 16,
-  },
+  scrollContent: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 16 },
 
-  // ── Header ───────────────────────────────────────────────────
-  headerRow: {
-    flexDirection: 'row', alignItems: 'center',
-    marginBottom: 18,
-  },
-  avatarContainer: {
-    width: 52, height: 52,
-    marginRight: 14,
-    position: 'relative',
-  },
+  headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 18 },
+  avatarContainer: { width: 52, height: 52, marginRight: 14, position: 'relative' },
   avatarPressable: {
-    width: 52, height: 52, borderRadius: 26,
-    overflow: 'hidden',
+    width: 52, height: 52, borderRadius: 26, overflow: 'hidden',
     borderWidth: 2.5, borderColor: 'rgba(255,255,255,0.35)',
   },
   avatar: { width: '100%', height: '100%' },
   cameraBadge: {
     position: 'absolute', bottom: 0, right: -2,
     width: 20, height: 20, borderRadius: 10,
-    backgroundColor: Colors.primary,
-    borderWidth: 2, borderColor: '#9B1515',
-    alignItems: 'center', justifyContent: 'center',
-    zIndex: 1,
+    backgroundColor: Colors.primary, borderWidth: 2, borderColor: '#9B1515',
+    alignItems: 'center', justifyContent: 'center', zIndex: 1,
   },
   greetingBlock: { flex: 1 },
-  hiText: {
-    fontFamily: Fonts.poppins.semiBold,
-    fontSize: 18, color: '#fff',
-  },
+  hiText: { fontFamily: Fonts.poppins.semiBold, fontSize: 18, color: '#fff' },
   subText: {
-    fontFamily: Fonts.poppins.regular,
-    fontSize: 12, color: 'rgba(255,255,255,0.6)',
-    marginTop: 1,
+    fontFamily: Fonts.poppins.regular, fontSize: 12,
+    color: 'rgba(255,255,255,0.6)', marginTop: 1,
   },
 
-  // ── Active delivery ───────────────────────────────────────────
   activeBanner: {
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#fff', borderRadius: 16, padding: 14,
-    marginBottom: 12,
+    backgroundColor: '#fff', borderRadius: 16, padding: 14, marginBottom: 12,
     shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15, shadowRadius: 10, elevation: 6,
   },
   activePulseRing: {
     width: 32, height: 32, borderRadius: 16,
-    backgroundColor: 'rgba(155,21,21,0.12)',
-    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(155,21,21,0.12)', alignItems: 'center', justifyContent: 'center',
   },
-  activePulseDot: {
-    width: 14, height: 14, borderRadius: 7,
-    backgroundColor: Colors.primary,
-  },
-  activeBannerTitle: {
-    fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.textPrimary,
-  },
-  activeBannerSub: {
-    fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginTop: 1,
-  },
+  activePulseDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: Colors.primary },
+  activeBannerTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.textPrimary },
+  activeBannerSub: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginTop: 1 },
   activeBannerArrow: {
     width: 30, height: 30, borderRadius: 15,
-    backgroundColor: 'rgba(155,21,21,0.1)',
-    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(155,21,21,0.1)', alignItems: 'center', justifyContent: 'center',
   },
 
-  // ── Promo ─────────────────────────────────────────────────────
   promoBanner: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.1)',
@@ -548,25 +518,20 @@ const styles = StyleSheet.create({
   },
   promoIconBox: {
     width: 38, height: 38, borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center',
   },
-  promoPrimary: {
-    fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: '#fff',
-  },
+  promoPrimary: { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: '#fff' },
   promoSecondary: {
     fontFamily: Fonts.poppins.regular, fontSize: 11,
     color: 'rgba(255,255,255,0.55)', marginTop: 1, textDecorationLine: 'underline',
   },
 
-  // ── Section title ─────────────────────────────────────────────
   sectionTitle: {
-    fontFamily: Fonts.poppins.semiBold,
-    fontSize: 14, color: 'rgba(255,255,255,0.7)',
-    letterSpacing: 1, textTransform: 'uppercase', marginBottom: 14,
+    fontFamily: Fonts.poppins.semiBold, fontSize: 14,
+    color: 'rgba(255,255,255,0.7)', letterSpacing: 1,
+    textTransform: 'uppercase', marginBottom: 14,
   },
 
-  // ── Service cards ─────────────────────────────────────────────
   servicesRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
   serviceCard: {
     flex: 1, backgroundColor: 'rgba(255,255,255,0.2)',
@@ -575,32 +540,30 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.12, shadowRadius: 8, elevation: 4,
   },
   serviceImgContainer: {
-    width: '100%', height: 130,
-    alignItems: 'center', justifyContent: 'center',
+    width: '100%', height: 130, alignItems: 'center', justifyContent: 'center',
     paddingTop: 16, paddingHorizontal: 12,
   },
   serviceImg: { width: '100%', height: '100%' },
   serviceLabel: {
     fontFamily: Fonts.poppins.medium, fontSize: 13,
-    color: "#fff", textAlign: 'center', paddingHorizontal: 10, marginTop: 6,
+    color: '#fff', textAlign: 'center', paddingHorizontal: 10, marginTop: 6,
   },
 
-  // ── Wallet ────────────────────────────────────────────────────
-  walletCard: {
+  historyCard: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderRadius: 18, padding: 16,
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
   },
-  walletLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  walletIconCircle: {
+  historyLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  historyIconCircle: {
     width: 44, height: 44, borderRadius: 22,
     backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center',
   },
-  walletTitle: {
+  historyTitle: {
     fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: '#fff', marginLeft: 14,
   },
-  walletSub: {
+  historySub: {
     fontFamily: Fonts.poppins.regular, fontSize: 11,
     color: 'rgba(255,255,255,0.5)', marginTop: 2, marginLeft: 14,
   },

@@ -19,7 +19,8 @@ export default function ConfirmPickupScreen() {
   const deliveryId = params.deliveryId as string;
   const userName = params.userName as string;
   const userPhoto = params.userPhoto as string;
-
+  const recipientPhone = params.recipientPhone as string;
+const userPhone = params.userPhone as string;
   const [code, setCode] = useState<string[]>(Array(CODE_LENGTH).fill(''));
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
@@ -121,6 +122,7 @@ export default function ConfirmPickupScreen() {
         params: {
           userName,
           userPhoto,
+          userPhone,
           deliveryId: isThis ? deliveryId : d._id,
           deliveryCode: isThis ? (verifyRes.data.data?.deliveryCode ?? '') : (d.deliveryCode ?? ''),
           destLabel: d.recipient?.address?.label ?? '',

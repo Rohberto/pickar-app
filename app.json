@@ -17,11 +17,13 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.pickar.app",
+       "config": {
+    "googleMapsApiKey": "AIzaSyATNL2Szmpm5ZG4JF0EuR-3rWkWukouuY8"
+  },
       "splash": {
         "image": "./assets/images/splash-icon.png",
         "resizeMode": "contain",
-        "backgroundColor": "#8B1538",
-        "buildNumber": "1"
+        "backgroundColor": "#8B1538"
       },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false

@@ -5,12 +5,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -83,22 +83,39 @@ export default function WithdrawScreen() {
     if (numericAmount > balance) return Alert.alert('Insufficient Balance', 'Amount exceeds your earnings balance');
     if (!selectedAccount) return Alert.alert('Select Account', 'Please select a bank account');
 
-    setLoading(true);
-    try {
-      const { data } = await api.post('/drivers/withdraw', {
-        amount: numericAmount,
-        bankAccountId: selectedAccount,
-      });
-      if (data.success) {
-        Alert.alert('Withdrawal Initiated', data.message, [
-          { text: 'OK', onPress: () => router.back() },
-        ]);
-      }
-    } catch (err: any) {
-      Alert.alert('Error', err.response?.data?.message || 'Withdrawal failed');
-    } finally {
-      setLoading(false);
-    }
+    const account = accounts.find(a => a._id === selectedAccount);
+
+    Alert.alert(
+      'Confirm Withdrawal',
+      `Withdraw ₦${numericAmount.toLocaleString()} to ${account?.bankName} – ${account?.accountNumber}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm',
+          onPress: async () => {
+            setLoading(true);
+            try {
+              const { data } = await api.post('/drivers/withdraw', {
+                amount: numericAmount,
+                bankAccountId: selectedAccount,
+              });
+              if (data.success) {
+                Alert.alert(
+                  '⏳ Withdrawal Processing',
+                  data.message ||
+                    `Your withdrawal of ₦${numericAmount.toLocaleString()} is being processed. You'll receive funds in your ${account?.bankName} account within 24 hours.`,
+                  [{ text: 'OK', onPress: () => router.back() }]
+                );
+              }
+            } catch (err: any) {
+              Alert.alert('Error', err.response?.data?.message || 'Withdrawal failed. Please try again.');
+            } finally {
+              setLoading(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const isReady = numericAmount >= 1000 && numericAmount <= balance && !!selectedAccount;

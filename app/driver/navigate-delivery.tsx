@@ -1,3 +1,4 @@
+import ChatButton from '@/components/ChatButton';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import api from '@/services/api';
@@ -18,7 +19,6 @@ import {
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { io, Socket } from 'socket.io-client';
-
 const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || 'http://localhost:3000';
 const GOOGLE_MAPS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
 
@@ -85,7 +85,8 @@ export default function NavigateDeliveryScreen() {
   const recipientName = (params.recipientName as string) || '';
   const recipientPhone = (params.recipientPhone as string) || '';
   const price = (params.price as string) || '0';
-const userPhoto = (params.userPhoto as string) || null;
+const userPhoto = (params.userPhoto as string) || undefined;
+const userPhone = (params.userPhone as string) || undefined;
   const destLat = parseFloat(params.destLat as string) || 6.5244;
   const destLng = parseFloat(params.destLng as string) || 3.3792;
   const pickupLat = parseFloat(params.pickupLat as string) || 6.5244;
@@ -389,7 +390,8 @@ const userPhoto = (params.userPhoto as string) || null;
       </MapView>
 
       {/* Back button */}
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+      <TouchableOpacity style={styles.backButton} onPress={() => {if (router.canGoBack()) router.back();
+else router.replace('/user/(tabs)/home');}}>
         <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
       </TouchableOpacity>
 
@@ -417,10 +419,14 @@ const userPhoto = (params.userPhoto as string) || null;
           </View>
 
           <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.chatBtn}>
-              <Ionicons name="chatbox-outline" size={17} color={Colors.primary} />
-              <Text style={styles.chatBtnText}>Chat with Driver</Text>
-            </TouchableOpacity>
+                    <ChatButton
+              deliveryId={deliveryId}
+              side="driver"
+              variant="full"           // just the icon with badge
+              userName={userName}
+              userPhoto={userPhoto}
+              userPhone={userPhone}
+            />
             <TouchableOpacity style={styles.callBtn} onPress={() => Linking.openURL(`tel:${recipientPhone}`)}>
               <Ionicons name="call-outline" size={19} color={Colors.primary} />
             </TouchableOpacity>

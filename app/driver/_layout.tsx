@@ -28,6 +28,8 @@ export default function DriverLayout() {
       <Stack.Screen name="confirm-delivery" />
       <Stack.Screen name="delivery-complete" />
        <Stack.Screen name="withdraw" />
+       <Stack.Screen name="add-bank-account" />
+       <Stack.Screen name="chat" />
     </Stack>
   );
 }

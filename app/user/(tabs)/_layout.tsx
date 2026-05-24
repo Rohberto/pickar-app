@@ -3,7 +3,7 @@ import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
-
+import { Image } from 'react-native';
 export default function UserTabLayout() {
   return (
     <Tabs
@@ -25,15 +25,19 @@ export default function UserTabLayout() {
         },
       }}
     >
-      <Tabs.Screen
-        name="home"
-        options={{
-          title: 'Home',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="home" size={size} color={color} />
-          ),
-        }}
+     <Tabs.Screen
+  name="home"
+  options={{
+    title: 'Home',
+    tabBarIcon: ({ size }) => (
+      <Image
+        source={require('@/assets/images/home.png')}
+        style={{ width: size, height: size }}
+        resizeMode="contain"
       />
+    ),
+  }}
+/>
            <Tabs.Screen
         name="wallet"
         options={{
@@ -53,9 +57,9 @@ export default function UserTabLayout() {
         }}
       />
       <Tabs.Screen
-        name="profile"
+        name="account"
         options={{
-          title: 'Profile',
+          title: 'Account',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="person" size={size} color={color} />
           ),

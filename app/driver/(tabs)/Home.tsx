@@ -46,6 +46,7 @@ interface TripOffer {
   destination: { label: string; coordinates: { lat: number; lng: number } };
   recipientName?: string;
   recipientPhone?: string;
+  userPhone?: string;
   packageType: string;
   price: number;
   rideType: string;
@@ -57,6 +58,8 @@ interface IncomingRequest {
   deliveryId: string;
   userName: string;
   userPhoto?: string;
+  userPhone?: string;   // ← add this
+  recipientPhone?: string;
   pickupLabel: string;
   pickupCoords: { lat: number; lng: number };
   destLabel: string;
@@ -147,22 +150,15 @@ export default function DriverHomeScreen() {
       console.error('[DriverHome] fetchDriverProfile:', err);
     }
   };
-
-  const fetchStats = async () => {
-    try {
-      const { data } = await api.get('/deliveries/history');
-      if (data.success) {
-        const deliveries = data.data || [];
-        setTotalTrips(deliveries.length);
-        // Sum today's earnings
-        const today = new Date().toDateString();
-        const todayTotal = deliveries
-          .filter((d: any) => new Date(d.createdAt).toDateString() === today && d.status === 'delivered')
-          .reduce((sum: number, d: any) => sum + (d.price || 0), 0);
-        setTodayEarnings(todayTotal);
-      }
-    } catch (_) {}
-  };
+const fetchStats = async () => {
+  try {
+    const { data } = await api.get('/drivers/earnings');
+    if (data.success) {
+      setTodayEarnings(data.data.todayEarnings ?? 0);
+      setTotalTrips(data.data.allTimeRides ?? 0);  // ← all time
+    }
+  } catch (_) {}
+};
 
   // ─── Active trip check ────────────────────────────────────────────
   const checkActiveTrip = async () => {
@@ -275,10 +271,13 @@ export default function DriverHomeScreen() {
     });
 
     socket.on('trip_offer', (payload: TripOffer) => {
+
       setIncomingRequest({
         deliveryId: payload.deliveryId,
         userName: payload.recipientName ?? 'Customer',
         userPhoto: payload.userPhoto,
+        userPhone: payload.userPhone ?? '',  // ← add this
+        recipientPhone: payload.recipientPhone ?? '',
         pickupLabel: payload.pickup?.label ?? '',
         pickupCoords: payload.pickup?.coordinates ?? { lat: 0, lng: 0 },
         destLabel: payload.destination?.label ?? '',
@@ -367,6 +366,7 @@ export default function DriverHomeScreen() {
   // ─── Accept / Decline ─────────────────────────────────────────────
   const handleAccept = async () => {
     if (!incomingRequest || accepting) return;
+    console.log(incomingRequest);
     setAccepting(true);
     const { deliveryId } = incomingRequest;
     const isAdditional = activeTrips.length > 0;
@@ -375,19 +375,21 @@ export default function DriverHomeScreen() {
       setActiveTrips(prev => [...prev, deliveryId]);
       hideSheet();
       if (!isAdditional) {
-        router.push({
-          pathname: '/driver/navigate-pickup',
-          params: {
-            deliveryId,
-            userName: incomingRequest.userName,
-            userPhoto: incomingRequest.userPhoto ?? '',
-            pickupLabel: incomingRequest.pickupLabel,
-            pickupLat: String(incomingRequest.pickupCoords.lat),
-            pickupLng: String(incomingRequest.pickupCoords.lng),
-            destLabel: incomingRequest.destLabel,
-            price: String(incomingRequest.price),
-          },
-        } as never);
+       router.push({
+  pathname: '/driver/navigate-pickup',
+  params: {
+    deliveryId,
+    userName: incomingRequest.userName,
+    userPhoto: incomingRequest.userPhoto ?? '',
+    recipientPhone: incomingRequest.recipientPhone ?? '',
+    userPhone: incomingRequest.userPhone ?? '',
+    pickupLabel: incomingRequest.pickupLabel,
+    pickupLat: String(incomingRequest.pickupCoords.lat),
+    pickupLng: String(incomingRequest.pickupCoords.lng),
+    destLabel: incomingRequest.destLabel,
+    price: String(incomingRequest.price),
+  },
+} as never);
       }
     } catch (err) {
       console.error('[DriverHome] accept error:', err);
@@ -523,11 +525,13 @@ export default function DriverHomeScreen() {
             <Text style={styles.statLabel}>Today's earnings</Text>
           </View>
           <View style={styles.statDivider} />
+
           <View style={styles.statCard}>
             <Ionicons name="bicycle-outline" size={20} color="rgba(255,255,255,0.7)" />
             <Text style={styles.statValue}>{totalTrips}</Text>
-            <Text style={styles.statLabel}>Total trips</Text>
+            <Text style={styles.statLabel}>Total rides</Text> 
           </View>
+
           <View style={styles.statDivider} />
           <View style={styles.statCard}>
             <Ionicons name="star-outline" size={20} color="rgba(255,255,255,0.7)" />

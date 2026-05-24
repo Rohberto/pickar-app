@@ -1,3 +1,4 @@
+import ChatButton from '@/components/ChatButton';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import api from '@/services/api';
@@ -41,6 +42,7 @@ export default function NavigatePickupScreen() {
   const deliveryId = params.deliveryId as string;
   const userName = params.userName as string;
   const userPhoto = params.userPhoto as string;
+  const userPhone = params.userPhone as string;
   const pickupLabel = params.pickupLabel as string;
   const pickupLat = parseFloat(params.pickupLat as string);
   const pickupLng = parseFloat(params.pickupLng as string);
@@ -215,6 +217,8 @@ export default function NavigatePickupScreen() {
           deliveryId,
           userName,
           userPhoto,
+          userPhone,
+          recipientPhone: params.recipientPhone as string,
           pickupLat: String(pickupLat),
           pickupLng: String(pickupLng),
         },
@@ -289,7 +293,8 @@ export default function NavigatePickupScreen() {
         )}
       </MapView>
 
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+      <TouchableOpacity style={styles.backButton} onPress={() => {if (router.canGoBack()) router.back();
+else router.replace('/user/(tabs)/home');}}>
         <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
       </TouchableOpacity>
 
@@ -318,10 +323,14 @@ export default function NavigatePickupScreen() {
         </View>
 
         <View style={styles.actionRow}>
-          <TouchableOpacity style={styles.chatBtn}>
-            <Ionicons name="chatbox-outline" size={17} color={Colors.primary} />
-            <Text style={styles.chatBtnText}>Chat with Driver</Text>
-          </TouchableOpacity>
+        <ChatButton
+  deliveryId={deliveryId}
+  side="driver"
+  variant="full"           // just the icon with badge
+  userName={userName}
+  userPhoto={userPhoto}
+  userPhone={userPhone}
+/>
           <TouchableOpacity style={styles.callBtn} onPress={() => Linking.openURL(`tel:${params.recipientPhone}`)}>
             <Ionicons name="call-outline" size={19} color={Colors.primary} />
           </TouchableOpacity>

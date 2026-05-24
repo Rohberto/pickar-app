@@ -21,6 +21,7 @@ interface Transaction {
   amount: number;
   description: string;
   createdAt: string;
+  status?: string;
 }
 
 interface EarningsData {
@@ -147,21 +148,33 @@ export default function DriverEarningsScreen() {
           </View>
         ) : (
           <View style={styles.txCard}>
-            {earnings!.recentTransactions.map((tx, i) => (
-              <View key={tx._id}>
-                {i > 0 && <View style={styles.txDivider} />}
-                <View style={styles.txRow}>
-                  <BankBadge name={tx.description?.split(' ')[0] ?? 'P'} />
-                  <View style={{ flex: 1, marginLeft: 14 }}>
-                    <Text style={styles.txDesc} numberOfLines={1}>{tx.description}</Text>
-                    <Text style={styles.txDate}>{formatDate(tx.createdAt)}</Text>
+            {earnings!.recentTransactions.map((tx, i) => {
+              const isEarning = tx.type === 'earning';
+              const isPending = tx.status === 'pending';
+              const bankName = tx.description?.split(' ')?.[0] ?? 'P';
+              return (
+                <View key={tx._id}>
+                  {i > 0 && <View style={styles.txDivider} />}
+                  <View style={styles.txRow}>
+                    <BankBadge name={bankName} />
+                    <View style={{ flex: 1, marginLeft: 14 }}>
+                      <Text style={styles.txDesc} numberOfLines={1}>{tx.description}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                        <Text style={styles.txDate}>{formatDate(tx.createdAt)}</Text>
+                        {isPending && (
+                          <View style={styles.pendingBadge}>
+                            <Text style={styles.pendingBadgeText}>Processing</Text>
+                          </View>
+                        )}
+                      </View>
+                    </View>
+                    <Text style={[styles.txAmount, isEarning && { color: '#16A34A' }]}>
+                      {isEarning ? '+' : '-'}₦{tx.amount.toLocaleString()}
+                    </Text>
                   </View>
-                  <Text style={[styles.txAmount, tx.type === 'earning' && { color: '#16A34A' }]}>
-                    {tx.type === 'earning' ? '+' : '-'}₦{tx.amount.toLocaleString()}
-                  </Text>
                 </View>
-              </View>
-            ))}
+              );
+            })}
           </View>
         )}
 
@@ -220,4 +233,9 @@ const styles = StyleSheet.create({
   emptyBox: { alignItems: 'center', paddingVertical: 48, gap: 8 },
   emptyText: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary },
   emptySubText: { fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.textSecondary },
+  pendingBadge: {
+    backgroundColor: '#FEF3C7', borderRadius: 6,
+    paddingHorizontal: 6, paddingVertical: 2,
+  },
+  pendingBadgeText: { fontFamily: Fonts.poppins.medium, fontSize: 10, color: '#D97706' },
 });

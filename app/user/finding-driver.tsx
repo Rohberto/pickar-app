@@ -2,6 +2,7 @@ import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
 import api from '@/services/api';
+import { useChatStore } from '@/store/chatStore';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -124,10 +125,15 @@ export default function FindingDriverScreen() {
   const [driverDistance, setDriverDistance] = useState('');
   const [showTripDetails, setShowTripDetails] = useState(false);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
+  const { incrementUnread, clearUnread, unreadCounts } = useChatStore();
+  const unreadCount = unreadCounts[deliveryId] ?? 0;
 
   const bannerAnim = useRef(new Animated.Value(-130)).current;
   const tripDetailsAnim = useRef(new Animated.Value(600)).current;
   const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Dynamic banner content — default is delivery status, overridden for chat
+  const bannerTitleRef = useRef('');
+  const bannerBodyRef  = useRef('');
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const socketRef = useRef<Socket | null>(null);
   const mapRef = useRef<MapView>(null);
@@ -351,19 +357,20 @@ export default function FindingDriverScreen() {
       const loc = payload.location ?? payload;
       if (!loc?.lat) return;
 
-      // Sync ref immediately — critical for package_picked_up handler
       driverLocationRef.current = loc;
       setDriverLocation(loc);
 
-      // Use statusRef (not state) to get the current status synchronously
-      const target = statusRef.current === 'in_transit'
+      // statusRef is always updated synchronously in socket handlers
+      // so this correctly switches target when in_transit
+      const isInTransit = statusRef.current === 'in_transit';
+      const target = isInTransit
         ? deliveryRef.current?.recipient?.address?.coordinates
         : deliveryRef.current?.pickupAddress?.coordinates;
 
-      if (target) {
+      // Guard: only calculate if target has real coordinates (not 0,0 or undefined)
+      if (target?.lat && target?.lng) {
         setDriverDistance(calcDistance(loc, target));
         setEta(calcEta(loc.lat, loc.lng, target.lat, target.lng));
-        // Do NOT refit map — let user zoom/pan freely
       }
     });
 
@@ -377,42 +384,49 @@ export default function FindingDriverScreen() {
     socket.on('package_picked_up', (payload) => {
       setDeliveryCode(payload.deliveryCode ?? '');
 
-      // ── FIX: Update statusRef IMMEDIATELY (not via useEffect) ────────
-      // This ensures the very next driver_location event targets
-      // recipient coords instead of pickup coords, avoiding 0km/< 1min bug
+      // Update statusRef IMMEDIATELY — next driver_location uses recipient coords
       statusRef.current = 'in_transit';
       setStatus('in_transit');
 
       hasInitialFitRef.current = false;
-      setRouteCoords([]); // clear old pickup→driver route immediately
+      setRouteCoords([]); // clear old route immediately
 
       const recipient = deliveryRef.current?.recipient?.address?.coordinates;
-
-      // ── FIX: Route from driver's CURRENT position → recipient ────────
-      // Previously used pickup → recipient which is wrong —
-      // the driver is no longer at pickup, they're leaving from their
-      // actual GPS position
       const driverLoc = driverLocationRef.current;
 
-      if (driverLoc && recipient) {
-        // Immediately show correct distance and ETA to recipient
+      if (driverLoc && recipient?.lat && recipient?.lng) {
+        // Immediately correct distance and ETA for recipient
         setDriverDistance(calcDistance(driverLoc, recipient));
         setEta(calcEta(driverLoc.lat, driverLoc.lng, recipient.lat, recipient.lng));
 
-        // Fetch real road route from driver's current location to recipient
+        // Fetch real road route from driver's current position to recipient
         fetchRoute(driverLoc.lat, driverLoc.lng, recipient.lat, recipient.lng);
 
-        // Refit map to show driver → recipient
-        mapRef.current?.fitToCoordinates(
-          [
-            { latitude: driverLoc.lat, longitude: driverLoc.lng },
-            { latitude: recipient.lat, longitude: recipient.lng },
-          ],
-          { edgePadding: { top: 80, right: 60, bottom: 300, left: 60 }, animated: true }
+        // Use animateToRegion instead of fitToCoordinates —
+        // fitToCoordinates with large bottom padding zooms in too aggressively.
+        // animateToRegion gives us explicit control over the zoom level.
+        const midLat = (driverLoc.lat + recipient.lat) / 2;
+        const midLng = (driverLoc.lng + recipient.lng) / 2;
+        const latDelta = Math.max(Math.abs(driverLoc.lat - recipient.lat) * 2.2, 0.025);
+        const lngDelta = Math.max(Math.abs(driverLoc.lng - recipient.lng) * 2.2, 0.025);
+
+        mapRef.current?.animateToRegion(
+          { latitude: midLat, longitude: midLng, latitudeDelta: latDelta, longitudeDelta: lngDelta },
+          800
         );
         hasInitialFitRef.current = true;
       }
 
+      showBanner();
+    });
+
+    // Incoming chat message while user is on this screen but chat is closed
+    socket.on('new_message', (msg: any) => {
+      if (msg.senderType !== 'driver') return;
+      incrementUnread(deliveryId, msg.message, 'driver');
+      // Show banner notification
+      bannerTitleRef.current = '💬 New message from driver';
+      bannerBodyRef.current = msg.message?.slice(0, 80) ?? 'You have a new message';
       showBanner();
     });
 
@@ -533,9 +547,15 @@ export default function FindingDriverScreen() {
 
   const handleChatWithDriver = () => {
     if (!driver?._id) return;
+    clearUnread(deliveryId);
     router.push({
       pathname: '/user/chat',
-      params: { deliveryId, driverId: driver._id, driverName: driver.name },
+      params: {
+        deliveryId,
+        driverName: driver.name,
+        driverPhoto: driver.photo ?? '',
+        driverPhone: driver.phone ?? '',
+      },
     } as never);
   };
 
@@ -790,6 +810,13 @@ export default function FindingDriverScreen() {
               <TouchableOpacity style={styles.chatBtn} onPress={handleChatWithDriver}>
                 <Ionicons name="chatbox-outline" size={17} color={Colors.primary} />
                 <Text style={styles.chatBtnText}>Chat with Driver</Text>
+                {unreadCount > 0 && (
+                  <View style={styles.chatBadge}>
+                    <Text style={styles.chatBadgeText}>
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </Text>
+                  </View>
+                )}
               </TouchableOpacity>
               <TouchableOpacity style={styles.callBtn} onPress={handleCallDriver}>
                 <Ionicons name="call-outline" size={19} color={Colors.primary} />
@@ -996,8 +1023,17 @@ const styles = StyleSheet.create({
   chatBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, borderColor: Colors.border, borderRadius: 12, paddingVertical: 13, gap: 8,
+    position: 'relative',
   },
   chatBtnText: { fontFamily: Fonts.poppins.medium, fontSize: 14, color: Colors.primary },
+  chatBadge: {
+    position: 'absolute', top: -8, right: -8,
+    backgroundColor: Colors.primary, borderRadius: 10,
+    minWidth: 20, height: 20, paddingHorizontal: 4,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: Colors.white,
+  },
+  chatBadgeText: { fontFamily: Fonts.poppins.bold, fontSize: 10, color: Colors.white },
   callBtn: { width: 48, height: 48, borderRadius: 12, borderWidth: 1, borderColor: Colors.border, alignItems: 'center', justifyContent: 'center' },
 
   divider: { height: 1, backgroundColor: Colors.border, marginVertical: 14 },

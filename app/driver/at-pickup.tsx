@@ -1,3 +1,4 @@
+import ChatButton from '@/components/ChatButton';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import api from '@/services/api';
@@ -37,6 +38,8 @@ export default function AtPickupScreen() {
   const deliveryId = params.deliveryId as string;
   const userName = params.userName as string;
   const userPhoto = params.userPhoto as string;
+  const userPhone = params.userPhone as string;
+const recipientPhone = params.recipientPhone as string;
   const pickupLat = parseFloat(params.pickupLat as string) || 6.5244;
   const pickupLng = parseFloat(params.pickupLng as string) || 3.3792;
 
@@ -139,7 +142,7 @@ export default function AtPickupScreen() {
     try {
       router.push({
         pathname: '/driver/confirm-pickup',
-        params: { deliveryId, userName, userPhoto },
+        params: { deliveryId, userName, userPhoto, userPhone, recipientPhone },
       } as never);
     } finally {
       setLoading(false);
@@ -182,7 +185,8 @@ export default function AtPickupScreen() {
         </Marker>
       </MapView>
 
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+      <TouchableOpacity style={styles.backButton}  onPress={() => {if (router.canGoBack()) router.back();
+else router.replace('/user/(tabs)/home');}}>
         <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
       </TouchableOpacity>
 
@@ -202,10 +206,14 @@ export default function AtPickupScreen() {
         <View style={styles.divider} />
 
         <View style={styles.actionRow}>
-          <TouchableOpacity style={styles.actionBtn}>
-            <Ionicons name="chatbox-outline" size={20} color={Colors.primary} />
-            <Text style={styles.actionBtnText}>Chat with User</Text>
-          </TouchableOpacity>
+                  <ChatButton
+            deliveryId={deliveryId}
+            side="driver"
+            variant="full"           // just the icon with badge
+            userName={userName}
+            userPhoto={userPhoto}
+            userPhone={userPhone}
+          />
           <TouchableOpacity style={styles.iconBtn} onPress={() => Linking.openURL(`tel:${params.recipientPhone}`)}>
             <Ionicons name="call-outline" size={20} color={Colors.primary} />
           </TouchableOpacity>

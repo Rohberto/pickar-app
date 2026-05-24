@@ -28,6 +28,8 @@ export default function UserLayout() {
       <Stack.Screen name="track-package" />
       <Stack.Screen name="delivery-complete" />
       <Stack.Screen name="add-funds" />
+      <Stack.Screen name="chat" />
+      <Stack.Screen name="ride-history" options={{ headerShown: false }} />
     </Stack>
   );
 }

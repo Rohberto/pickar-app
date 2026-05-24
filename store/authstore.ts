@@ -7,8 +7,9 @@ interface User {
   id: string;
   name: string;
   email: string;
+  phone?: string;      // ← add this
   type: UserType;
-  photo?: string | null; // profile picture URL (Cloudinary)
+  photo?: string | null;
 }
 
 interface AuthState {

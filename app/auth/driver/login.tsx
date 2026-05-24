@@ -4,6 +4,7 @@ import Input from '@/components/ui/input';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
+import api from '@/services/api';
 import authService from '@/services/authService';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -21,6 +22,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { registerForPushNotifications } from '../../../services/notificationService';
 
 export default function DriverLoginScreen() {
   const router = useRouter();
@@ -82,7 +84,10 @@ export default function DriverLoginScreen() {
           email: response.data.user.email,
           type: 'driver',
         });
-
+ const token = await registerForPushNotifications();
+      if (token) {
+        api.patch('/drivers/push-token', { token }).catch(() => {});
+      }
         // Navigate to driver home
         router.replace('/driver/(tabs)/Home' as never);
       }
