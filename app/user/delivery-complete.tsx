@@ -1,17 +1,18 @@
+import RatingModal from '@/components/RatingModal';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
 import {
-    Animated,
-    Image,
-    Platform,
-    Share,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  Animated,
+  Image,
+  Platform,
+  Share,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -36,6 +37,8 @@ export default function UserDeliveryCompleteScreen() {
   const receiptAnim = useRef(new Animated.Value(500)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
   const checkAnim = useRef(new Animated.Value(0)).current;
+const [showRating, setShowRating] = useState(true);
+
 
   // Animate checkmark on mount
   useState(() => {
@@ -238,8 +241,16 @@ export default function UserDeliveryCompleteScreen() {
             </View>
             <Text style={styles.receiptOptionText}>Send receipt to email</Text>
           </TouchableOpacity>
+
+
         </Animated.View>
       )}
+      <RatingModal
+        visible={showRating}
+        deliveryId={deliveryId}
+        driverName={driverName}
+        onDone={() => setShowRating(false)}
+      />
     </SafeAreaView>
   );
 }

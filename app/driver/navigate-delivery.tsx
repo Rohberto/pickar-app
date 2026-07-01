@@ -15,12 +15,16 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
-  View
+  View,
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { io, Socket } from 'socket.io-client';
+
 const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || 'http://localhost:3000';
 const GOOGLE_MAPS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
+
+// ─── Arrival threshold ────────────────────────────────────────────
+const ARRIVAL_THRESHOLD_M = 80;
 
 const MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#f3f4f6' }] },
@@ -37,7 +41,7 @@ const MAP_STYLE = [
 type State = 'en_route' | 'arrived';
 type Sheet = 'main' | 'trip_details';
 
-// ─── Decode Google's encoded polyline ─────────────────────────────
+// ─── Decode Google encoded polyline ──────────────────────────────
 const decodePolyline = (encoded: string): { latitude: number; longitude: number }[] => {
   const poly: { latitude: number; longitude: number }[] = [];
   let index = 0, lat = 0, lng = 0;
@@ -53,77 +57,95 @@ const decodePolyline = (encoded: string): { latitude: number; longitude: number 
   return poly;
 };
 
-// ─── Haversine helpers ─────────────────────────────────────────────
-const calcEta = (lat1: number, lng1: number, lat2: number, lng2: number): string => {
-  const R = 6371;
+// ─── Haversine in metres ──────────────────────────────────────────
+const haversineMetres = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+  const R = 6371000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
-  const km = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const mins = Math.round((km / 20) * 60);
-  return mins < 1 ? '< 1 min' : `${mins} min${mins > 1 ? 's' : ''}`;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
-const calcDistanceKm = (lat1: number, lng1: number, lat2: number, lng2: number): string => {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
-  return (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1);
+const formatDistance = (m: number) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`;
+const formatEta = (s: number) => {
+  if (s < 60) return '< 1 min';
+  const mins = Math.round(s / 60);
+  return mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
 };
+
+// ─── Step maneuver → icon ─────────────────────────────────────────
+const stepIcon = (maneuver: string): keyof typeof Ionicons.glyphMap => {
+  if (maneuver.includes('left')) return 'arrow-back';
+  if (maneuver.includes('right')) return 'arrow-forward';
+  if (maneuver.includes('uturn')) return 'return-up-back';
+  if (maneuver.includes('roundabout')) return 'refresh';
+  return 'arrow-up';
+};
+
+interface Step {
+  instruction: string;
+  distance: string;
+  maneuver: string;
+  endLat: number;
+  endLng: number;
+}
 
 export default function NavigateDeliveryScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
 
-  // ─── Params ───────────────────────────────────────────────────────
-  const deliveryId = params.deliveryId as string;
-  const userName = (params.recipientName as string) || (params.userName as string) || 'Recipient';
-  const deliveryCode = params.deliveryCode as string;
-  const destLabel = (params.destLabel as string) || 'Destination';
-  const pickupLabel = (params.pickupLabel as string) || 'Pickup Location';
+  const deliveryId    = params.deliveryId as string;
+  const userName      = (params.recipientName as string) || (params.userName as string) || 'Recipient';
+  const deliveryCode  = params.deliveryCode as string;
+  const destLabel     = (params.destLabel as string) || 'Destination';
+  const pickupLabel   = (params.pickupLabel as string) || 'Pickup Location';
   const recipientName = (params.recipientName as string) || '';
   const recipientPhone = (params.recipientPhone as string) || '';
-  const price = (params.price as string) || '0';
-const userPhoto = (params.userPhoto as string) || undefined;
-const userPhone = (params.userPhone as string) || undefined;
-  const destLat = parseFloat(params.destLat as string) || 6.5244;
-  const destLng = parseFloat(params.destLng as string) || 3.3792;
-  const pickupLat = parseFloat(params.pickupLat as string) || 6.5244;
-  const pickupLng = parseFloat(params.pickupLng as string) || 3.3792;
+  const price         = (params.price as string) || '0';
+  const userPhoto     = (params.userPhoto as string) || undefined;
+  const userPhone     = (params.userPhone as string) || undefined;
+  const destLat       = parseFloat(params.destLat as string) || 6.5244;
+  const destLng       = parseFloat(params.destLng as string) || 3.3792;
+  const pickupLat     = parseFloat(params.pickupLat as string) || 6.5244;
+  const pickupLng     = parseFloat(params.pickupLng as string) || 3.3792;
 
-  // ─── State ────────────────────────────────────────────────────────
-  const [state, setState] = useState<State>('en_route');
-  const [sheet, setSheet] = useState<Sheet>('main');
+  const [state, setState]                   = useState<State>('en_route');
+  const [sheet, setSheet]                   = useState<Sheet>('main');
   const [driverLocation, setDriverLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [driverProfileId, setDriverProfileId] = useState<string | null>(null);
-  const [eta, setEta] = useState('');
-  const [distance, setDistance] = useState('');
+  const [eta, setEta]                       = useState('');
+  const [distance, setDistance]             = useState('');
+  const [routeCoords, setRouteCoords]       = useState<{ latitude: number; longitude: number }[]>([]);
+  const [routeLoading, setRouteLoading]     = useState(false);
+  const [steps, setSteps]                   = useState<Step[]>([]);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [navigationActive, setNavigationActive] = useState(false);
+  const [arrivalDetected, setArrivalDetected]   = useState(false);
+  const [dashPhase, setDashPhase]           = useState(0);
 
-  // Route — real road polyline from Google Directions API
-  const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
-  const [routeLoading, setRouteLoading] = useState(false);
-
-  // Animated dash phase — makes route line appear to flow forward (iOS)
-  const [dashPhase, setDashPhase] = useState(0);
-
-  const mapRef = useRef<MapView>(null);
-  const socketRef = useRef<Socket | null>(null);
-  const locationWatchRef = useRef<Location.LocationSubscription | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const dashIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const driverLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const mapRef             = useRef<MapView>(null);
+  const socketRef          = useRef<Socket | null>(null);
+  const locationWatchRef   = useRef<Location.LocationSubscription | null>(null);
+  const intervalRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dashIntervalRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const driverLocationRef  = useRef<{ latitude: number; longitude: number } | null>(null);
   const driverProfileIdRef = useRef<string | null>(null);
-  const isMountedRef = useRef(false);
-  const sheetAnim = useRef(new Animated.Value(600)).current;
+  const stepsRef           = useRef<Step[]>([]);
+  const currentStepRef     = useRef(0);
+  const isMountedRef       = useRef(false);
+  const sheetAnim          = useRef(new Animated.Value(600)).current;
+  const instructionAnim    = useRef(new Animated.Value(0)).current;
 
-  // ─── Mount ────────────────────────────────────────────────────────
+  // ─── Mount ────────────────────────────────────────────────────
   useEffect(() => {
     isMountedRef.current = true;
     fetchDriverProfile();
     startLocationTracking();
     connectSocket();
-    fetchRoute();
+    fetchOverviewRoute();
     startDashAnimation();
     return () => {
       isMountedRef.current = false;
@@ -136,12 +158,14 @@ const userPhone = (params.userPhone as string) || undefined;
 
   useEffect(() => { driverLocationRef.current = driverLocation; }, [driverLocation]);
   useEffect(() => { driverProfileIdRef.current = driverProfileId; }, [driverProfileId]);
+  useEffect(() => { stepsRef.current = steps; }, [steps]);
+  useEffect(() => { currentStepRef.current = currentStepIndex; }, [currentStepIndex]);
   useEffect(() => {
     if (driverProfileId) socketRef.current?.emit('join_driver_room', { driverId: driverProfileId });
   }, [driverProfileId]);
 
-  // ─── Fetch real road route from Google Directions API ─────────────
-  const fetchRoute = async () => {
+  // ─── Overview route (pickup → dest) on mount ─────────────────
+  const fetchOverviewRoute = async () => {
     if (!GOOGLE_MAPS_KEY) {
       setRouteCoords([
         { latitude: pickupLat, longitude: pickupLng },
@@ -166,49 +190,78 @@ const userPhone = (params.userPhone as string) || undefined;
           edgePadding: { top: 100, right: 60, bottom: 320, left: 60 },
           animated: true,
         });
-      } else {
-        setRouteCoords([
-          { latitude: pickupLat, longitude: pickupLng },
-          { latitude: destLat, longitude: destLng },
-        ]);
       }
     } catch (err) {
-      console.error('[NavigateDelivery] fetchRoute:', err);
-      setRouteCoords([
-        { latitude: pickupLat, longitude: pickupLng },
-        { latitude: destLat, longitude: destLng },
-      ]);
+      console.error('[NavigateDelivery] fetchOverviewRoute:', err);
     } finally {
       setRouteLoading(false);
     }
   };
 
-  // ─── Animated dashes ──────────────────────────────────────────────
+  // ─── Navigation route (driver → dest) with turn-by-turn steps ─
+  const fetchNavigationRoute = async (fromLat: number, fromLng: number) => {
+    if (!GOOGLE_MAPS_KEY) return;
+    try {
+      const url =
+        `https://maps.googleapis.com/maps/api/directions/json` +
+        `?origin=${fromLat},${fromLng}` +
+        `&destination=${destLat},${destLng}` +
+        `&mode=driving` +
+        `&key=${GOOGLE_MAPS_KEY}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.status === 'OK' && data.routes.length > 0) {
+        const route = data.routes[0];
+        const leg = route.legs[0];
+        setRouteCoords(decodePolyline(route.overview_polyline.points));
+
+        const parsedSteps: Step[] = leg.steps.map((s: any) => ({
+          instruction: s.html_instructions.replace(/<[^>]+>/g, ''),
+          distance: s.distance.text,
+          maneuver: s.maneuver ?? 'straight',
+          endLat: s.end_location.lat,
+          endLng: s.end_location.lng,
+        }));
+        setSteps(parsedSteps);
+        setCurrentStepIndex(0);
+        setDistance(leg.distance.text);
+        setEta(leg.duration.text);
+
+        Animated.spring(instructionAnim, {
+          toValue: 1, tension: 60, friction: 10, useNativeDriver: true,
+        }).start();
+      }
+    } catch (err) {
+      console.error('[NavigateDelivery] fetchNavigationRoute:', err);
+    }
+  };
+
+  // ─── Animated flowing dashes ──────────────────────────────────
   const startDashAnimation = () => {
     dashIntervalRef.current = setInterval(() => {
-      setDashPhase((prev) => (prev + 1.5) % 20);
+      setDashPhase(prev => (prev + 1.5) % 20);
     }, 60);
   };
 
-  // ─── Location tracking ────────────────────────────────────────────
+  // ─── Location tracking ────────────────────────────────────────
   const startLocationTracking = async () => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
 
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
       const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
       setDriverLocation(coords);
-      setEta(calcEta(coords.latitude, coords.longitude, destLat, destLng));
-      setDistance(calcDistanceKm(coords.latitude, coords.longitude, destLat, destLng));
+      const distM = haversineMetres(coords.latitude, coords.longitude, destLat, destLng);
+      setDistance(formatDistance(distM));
+      setEta(formatEta((distM / 20000) * 3600));
 
       locationWatchRef.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, distanceInterval: 0, timeInterval: 3000 },
+        { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 5, timeInterval: 2000 },
         (loc) => {
           const c = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
           setDriverLocation(c);
-          setEta(calcEta(c.latitude, c.longitude, destLat, destLng));
-          setDistance(calcDistanceKm(c.latitude, c.longitude, destLat, destLng));
+          onLocationUpdate(c.latitude, c.longitude);
         }
       );
 
@@ -220,13 +273,51 @@ const userPhone = (params.userPhone as string) || undefined;
             driverId: id, lat: loc.latitude, lng: loc.longitude,
           });
         }
-      }, 4000);
+      }, 3000);
     } catch (err) {
       console.error('[NavigateDelivery] location error:', err);
     }
   };
 
-  // ─── Socket ───────────────────────────────────────────────────────
+  // ─── Called on every GPS update ──────────────────────────────
+  const onLocationUpdate = (lat: number, lng: number) => {
+    const distM = haversineMetres(lat, lng, destLat, destLng);
+    setDistance(formatDistance(distM));
+    setEta(formatEta((distM / 20000) * 3600));
+
+    // Auto-advance turn-by-turn step
+    const currentSteps = stepsRef.current;
+    const idx = currentStepRef.current;
+    if (currentSteps.length > 0 && idx < currentSteps.length - 1) {
+      const distToEnd = haversineMetres(lat, lng, currentSteps[idx].endLat, currentSteps[idx].endLng);
+      if (distToEnd < 30) setCurrentStepIndex(idx + 1);
+    }
+
+    // Auto-arrival detection
+    if (distM < ARRIVAL_THRESHOLD_M && !arrivalDetected) {
+      setArrivalDetected(true);
+      if (isMountedRef.current) {
+        Alert.alert(
+          "You've Arrived! 🎉",
+          'You are at the drop-off location.',
+          [
+            { text: 'Not yet', style: 'cancel', onPress: () => setArrivalDetected(false) },
+            { text: 'Complete Delivery', onPress: () => setState('arrived') },
+          ]
+        );
+      }
+    }
+
+    // Keep map centred on driver in navigation mode
+    if (navigationActive) {
+      mapRef.current?.animateToRegion({
+        latitude: lat, longitude: lng,
+        latitudeDelta: 0.005, longitudeDelta: 0.005,
+      }, 500);
+    }
+  };
+
+  // ─── Socket ───────────────────────────────────────────────────
   const connectSocket = () => {
     const socket = io(SOCKET_URL, {
       transports: ['polling', 'websocket'],
@@ -235,7 +326,6 @@ const userPhone = (params.userPhone as string) || undefined;
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('[NavigateDelivery] Socket connected');
       if (driverProfileIdRef.current) {
         socket.emit('join_driver_room', { driverId: driverProfileIdRef.current });
       }
@@ -245,7 +335,7 @@ const userPhone = (params.userPhone as string) || undefined;
       if (!isMountedRef.current) return;
       Alert.alert('Trip Cancelled', 'The user has cancelled this trip.', [{
         text: 'OK',
-        onPress: () => setTimeout(() => router.replace('/driver/(tabs)/home' as never), 300),
+        onPress: () => setTimeout(() => router.replace('/driver/(tabs)/Home' as never), 300),
       }]);
     });
   };
@@ -259,8 +349,25 @@ const userPhone = (params.userPhone as string) || undefined;
     }
   };
 
-  // ─── Actions ──────────────────────────────────────────────────────
-  const handleOpenMaps = () => {
+  // ─── Start in-app navigation ──────────────────────────────────
+  const handleStartNavigation = async () => {
+    setNavigationActive(true);
+    const loc = driverLocationRef.current;
+    if (loc) {
+      await fetchNavigationRoute(loc.latitude, loc.longitude);
+      mapRef.current?.animateToRegion({
+        latitude: loc.latitude, longitude: loc.longitude,
+        latitudeDelta: 0.006, longitudeDelta: 0.006,
+      }, 800);
+    }
+  };
+
+  const handleStopNavigation = () => {
+    setNavigationActive(false);
+    fetchOverviewRoute();
+  };
+
+  const handleOpenExternalMaps = () => {
     const url = Platform.select({
       ios: `maps://app?daddr=${destLat},${destLng}&dirflg=d`,
       android: `google.navigation:q=${destLat},${destLng}`,
@@ -270,10 +377,6 @@ const userPhone = (params.userPhone as string) || undefined;
     );
   };
 
-  // ─── KEY FIX: Navigate to confirm-delivery for OTP verification ───
-  // Previously this called markDelivered directly — wrong.
-  // Correct flow: confirm-delivery verifies the delivery code with the
-  // recipient, then calls markDelivered, then shows delivery-complete.
   const handleCompleteDelivery = () => {
     router.push({
       pathname: '/driver/confirm-delivery',
@@ -300,17 +403,16 @@ const userPhone = (params.userPhone as string) || undefined;
       .start(() => setSheet('main'));
   };
 
-  // ─── Derived values ───────────────────────────────────────────────
   const pickupCoords = { latitude: pickupLat, longitude: pickupLng };
-  const destCoords = { latitude: destLat, longitude: destLng };
-  const destLine1 = destLabel.split(',')[0] ?? 'Destination';
-  const destLine2 = destLabel.split(',').slice(1).join(',').trim() ?? '';
+  const destCoords   = { latitude: destLat, longitude: destLng };
+  const destLine1    = destLabel.split(',')[0] ?? 'Destination';
+  const destLine2    = destLabel.split(',').slice(1).join(',').trim() ?? '';
+  const currentStep  = steps[currentStepIndex];
 
-  // ─── Render ───────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
 
-      {/* MAP */}
+      {/* ── MAP ──────────────────────────────────────────────────── */}
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
@@ -319,6 +421,7 @@ const userPhone = (params.userPhone as string) || undefined;
         showsCompass={false}
         showsMyLocationButton={false}
         toolbarEnabled={false}
+        showsTraffic={navigationActive}
         initialRegion={{
           latitude: (pickupLat + destLat) / 2,
           longitude: (pickupLng + destLng) / 2,
@@ -340,7 +443,7 @@ const userPhone = (params.userPhone as string) || undefined;
               <Ionicons name="location" size={14} color={Colors.primary} />
               <Text style={styles.destMarkerText}>
                 {state === 'en_route'
-                  ? eta ? `Arrives in ${eta}` : 'Drop off'
+                  ? (eta ? `${eta} away` : 'Drop off')
                   : 'Drop off spot'}
               </Text>
             </View>
@@ -348,38 +451,33 @@ const userPhone = (params.userPhone as string) || undefined;
           </View>
         </Marker>
 
-        {/* Driver marker — moves with real GPS */}
+        {/* Driver marker */}
         {driverLocation && (
-          <Marker
-            coordinate={driverLocation}
-            anchor={{ x: 0.5, y: 0.5 }}
-            tracksViewChanges={false}
-          >
+          <Marker coordinate={driverLocation} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
             <View style={styles.driverMarkerWrapper}>
               <View style={styles.driverIconBox}>
                 <Ionicons name="car" size={18} color={Colors.white} />
               </View>
-              <View style={styles.driverNameBox}>
-                <Text style={styles.driverNameText}>You</Text>
-                {distance ? <Text style={styles.driverDistText}>{distance} km away</Text> : null}
-              </View>
+              {!navigationActive && (
+                <View style={styles.driverNameBox}>
+                  <Text style={styles.driverNameText}>You</Text>
+                  {distance ? <Text style={styles.driverDistText}>{distance} away</Text> : null}
+                </View>
+              )}
             </View>
           </Marker>
         )}
 
-        {/* Single animated route line following actual roads */}
-        {routeCoords.length > 0 && (
+        {/* Route polyline */}
+        {routeCoords.length > 0 ? (
           <Polyline
             coordinates={routeCoords}
             strokeColor={Colors.primary}
             strokeWidth={4}
-            lineDashPattern={[12, 6]}
-            lineDashPhase={dashPhase}
+            lineDashPattern={navigationActive ? undefined : [12, 6]}
+            lineDashPhase={navigationActive ? undefined : dashPhase}
           />
-        )}
-
-        {/* Fallback while route is loading */}
-        {routeLoading && routeCoords.length === 0 && (
+        ) : (
           <Polyline
             coordinates={[pickupCoords, destCoords]}
             strokeColor={`${Colors.primary}50`}
@@ -389,77 +487,168 @@ const userPhone = (params.userPhone as string) || undefined;
         )}
       </MapView>
 
-      {/* Back button */}
-      <TouchableOpacity style={styles.backButton} onPress={() => {if (router.canGoBack()) router.back();
-else router.replace('/user/(tabs)/home');}}>
-        <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
-      </TouchableOpacity>
-
-      {/* ── EN ROUTE CARD ── */}
-      {state === 'en_route' && sheet === 'main' && (
-        <View style={styles.bottomCard}>
-          <View style={styles.dragHandle} />
-          <Text style={styles.cardTitle}>Drop off in  {eta || '...'}</Text>
-
-          <View style={styles.receiverRow}>
-             <View style={styles.avatarBox}>
-                        {userPhoto
-                          ? <Image source={{ uri: userPhoto }} style={styles.avatar} />
-                          : <Ionicons name="person" size={22} color={Colors.textSecondary} />
-                        }
-                      </View>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={styles.receiverName}>{userName}</Text>
-              <Text style={styles.receiverSub}>Recipient</Text>
+      {/* ── TURN-BY-TURN INSTRUCTION BANNER ──────────────────────── */}
+      {navigationActive && currentStep && (
+        <Animated.View style={[
+          styles.instructionBanner,
+          {
+            opacity: instructionAnim,
+            transform: [{
+              translateY: instructionAnim.interpolate({ inputRange: [0, 1], outputRange: [-20, 0] }),
+            }],
+          },
+        ]}>
+          <View style={styles.instructionIconBox}>
+            <Ionicons name={stepIcon(currentStep.maneuver)} size={28} color={Colors.white} />
+          </View>
+          <View style={styles.instructionTextBox}>
+            <Text style={styles.instructionText} numberOfLines={2}>
+              {currentStep.instruction}
+            </Text>
+            <Text style={styles.instructionDistance}>{currentStep.distance}</Text>
+          </View>
+          {steps[currentStepIndex + 1] && (
+            <View style={styles.nextStepBox}>
+              <Text style={styles.nextStepLabel}>Then</Text>
+              <Ionicons
+                name={stepIcon(steps[currentStepIndex + 1].maneuver)}
+                size={16}
+                color="rgba(255,255,255,0.7)"
+              />
             </View>
-            <TouchableOpacity style={styles.viewDetailsBtn} onPress={showTripDetails}>
-              <Ionicons name="person-outline" size={13} color={Colors.textSecondary} />
-              <Text style={styles.viewDetailsText}>View Details</Text>
-            </TouchableOpacity>
+          )}
+        </Animated.View>
+      )}
+
+      {/* ── ETA BAR (navigation mode) ─────────────────────────────── */}
+      {navigationActive && (
+        <View style={styles.etaBar}>
+          <View style={styles.etaItem}>
+            <Text style={styles.etaValue}>{eta || '...'}</Text>
+            <Text style={styles.etaLabel}>ETA</Text>
           </View>
-
-          <View style={styles.actionRow}>
-                    <ChatButton
-              deliveryId={deliveryId}
-              side="driver"
-              variant="full"           // just the icon with badge
-              userName={userName}
-              userPhoto={userPhoto}
-              userPhone={userPhone}
-            />
-            <TouchableOpacity style={styles.callBtn} onPress={() => Linking.openURL(`tel:${recipientPhone}`)}>
-              <Ionicons name="call-outline" size={19} color={Colors.primary} />
-            </TouchableOpacity>
+          <View style={styles.etaSep} />
+          <View style={styles.etaItem}>
+            <Text style={styles.etaValue}>{distance || '...'}</Text>
+            <Text style={styles.etaLabel}>Distance</Text>
           </View>
-
-          <View style={styles.dropoffRow}>
-            <Text style={styles.dropoffLabel}>Drop off at</Text>
-            <TouchableOpacity onPress={showTripDetails}>
-              <Text style={styles.seeTripText}>See Trip Details</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.addressLine}>
-            <Ionicons name="location" size={16} color={Colors.primary} />
-            <Text style={styles.addressTitle}>{destLine1}</Text>
-          </View>
-          <Text style={styles.addressSub}>
-            {destLine2}{'  '}
-            <Text style={styles.priceInline}>₦{parseInt(price || '0').toLocaleString()}</Text>
-          </Text>
-
-          <TouchableOpacity style={styles.primaryBtn} onPress={handleOpenMaps} activeOpacity={0.85}>
-            <Ionicons name="navigate-outline" size={18} color={Colors.white} style={{ marginRight: 8 }} />
-            <Text style={styles.primaryBtnText}>Navigate to Drop Off</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.secondaryBtn} onPress={() => setState('arrived')}>
-            <Text style={styles.secondaryBtnText}>I'm at the drop off location</Text>
+          <TouchableOpacity style={styles.etaExitBtn} onPress={handleStopNavigation}>
+            <Ionicons name="close" size={18} color={Colors.textPrimary} />
           </TouchableOpacity>
         </View>
       )}
 
-      {/* ── ARRIVED CARD ── */}
+      {/* ── BACK BUTTON (overview mode only) ─────────────────────── */}
+      {!navigationActive && (
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => { if (router.canGoBack()) router.back(); else router.replace('/driver/(tabs)/Home' as never); }}
+        >
+          <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
+        </TouchableOpacity>
+      )}
+
+      {/* ══ EN ROUTE CARD ══════════════════════════════════════════ */}
+      {state === 'en_route' && sheet === 'main' && (
+        <View style={styles.bottomCard}>
+          <View style={styles.dragHandle} />
+
+          {!navigationActive && (
+            <>
+              <Text style={styles.cardTitle}>Drop off in {eta || '...'}</Text>
+
+              {/* Destination address pill */}
+              <View style={styles.addressPill}>
+                <Ionicons name="location-outline" size={15} color={Colors.primary} />
+                <Text style={styles.addressPillText} numberOfLines={1}>{destLabel}</Text>
+              </View>
+
+              {/* Distance stat */}
+              {distance ? (
+                <View style={styles.statsRow}>
+                  <View style={styles.statItem}>
+                    <Ionicons name="navigate-outline" size={14} color={Colors.textSecondary} />
+                    <Text style={styles.statText}>{distance}</Text>
+                  </View>
+                  <View style={styles.statItem}>
+                    <Ionicons name="time-outline" size={14} color={Colors.textSecondary} />
+                    <Text style={styles.statText}>{eta}</Text>
+                  </View>
+                </View>
+              ) : null}
+            </>
+          )}
+
+          {/* Receiver row */}
+          <View style={styles.receiverRow}>
+            <View style={styles.avatarBox}>
+              {userPhoto
+                ? <Image source={{ uri: userPhoto }} style={styles.avatar} />
+                : <Ionicons name="person" size={22} color={Colors.textSecondary} />
+              }
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.receiverName}>{userName}</Text>
+              <Text style={styles.receiverSub}>Recipient</Text>
+            </View>
+            {!navigationActive && (
+              <TouchableOpacity style={styles.viewDetailsBtn} onPress={showTripDetails}>
+                <Ionicons name="person-outline" size={13} color={Colors.textSecondary} />
+                <Text style={styles.viewDetailsText}>View Details</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View style={styles.actionRow}>
+            <ChatButton
+              deliveryId={deliveryId}
+              side="driver"
+              variant="full"
+              userName={userName}
+              userPhoto={userPhoto}
+              userPhone={userPhone}
+            />
+            <TouchableOpacity
+              style={styles.callBtn}
+              onPress={() => Linking.openURL(`tel:${recipientPhone}`)}
+            >
+              <Ionicons name="call-outline" size={19} color={Colors.primary} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Primary — Start / Stop Navigation */}
+          <TouchableOpacity
+            style={styles.primaryBtn}
+            onPress={navigationActive ? handleStopNavigation : handleStartNavigation}
+            activeOpacity={0.85}
+          >
+            <Ionicons
+              name={navigationActive ? 'map-outline' : 'navigate'}
+              size={18}
+              color={Colors.white}
+              style={{ marginRight: 8 }}
+            />
+            <Text style={styles.primaryBtnText}>
+              {navigationActive ? 'Show Overview' : 'Start Navigation'}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Secondary options */}
+          <View style={styles.secondaryRow}>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={handleOpenExternalMaps}>
+              <Ionicons name="open-outline" size={14} color={Colors.textSecondary} />
+              <Text style={styles.secondaryBtnText}>Open in Google Maps</Text>
+            </TouchableOpacity>
+            <View style={styles.secSep} />
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => setState('arrived')}>
+              <Ionicons name="checkmark-circle-outline" size={14} color={Colors.textSecondary} />
+              <Text style={styles.secondaryBtnText}>I'm at drop off</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* ══ ARRIVED CARD ════════════════════════════════════════════ */}
       {state === 'arrived' && sheet === 'main' && (
         <View style={styles.arrivedCard}>
           <View style={styles.dragHandle} />
@@ -468,7 +657,7 @@ else router.replace('/user/(tabs)/home');}}>
             <TouchableOpacity onPress={() => setState('en_route')}>
               <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
             </TouchableOpacity>
-            <Text style={styles.cardTitle}>Drop off in  {eta || '...'}</Text>
+            <Text style={styles.cardTitle}>You've arrived!</Text>
             <View style={{ width: 24 }} />
           </View>
 
@@ -480,13 +669,13 @@ else router.replace('/user/(tabs)/home');}}>
             <Ionicons name="location" size={16} color={Colors.primary} />
             <Text style={[styles.addressTitle, { marginLeft: 6 }]}>{destLine1}</Text>
           </View>
+          {destLine2 ? <Text style={styles.addressSub}>{destLine2}</Text> : null}
 
           <View style={styles.recipientRow}>
             <Text style={styles.recipientName}>{recipientName || 'Recipient'}</Text>
             <Text style={styles.recipientPhone}>{recipientPhone}</Text>
           </View>
 
-          {/* Full-width tall button — navigates to confirm-delivery for code verification */}
           <TouchableOpacity
             style={styles.completeBtn}
             onPress={handleCompleteDelivery}
@@ -497,7 +686,7 @@ else router.replace('/user/(tabs)/home');}}>
         </View>
       )}
 
-      {/* ── TRIP DETAILS SHEET ── */}
+      {/* ══ TRIP DETAILS SHEET ══════════════════════════════════════ */}
       {sheet === 'trip_details' && (
         <Animated.View style={[styles.tripDetailsCard, { transform: [{ translateY: sheetAnim }] }]}>
           <View style={styles.dragHandle} />
@@ -520,7 +709,7 @@ else router.replace('/user/(tabs)/home');}}>
           <View style={styles.tripRow}>
             <Ionicons name="location" size={16} color={Colors.textPrimary} />
             <Text style={[styles.tripAddressText, { marginLeft: 8 }]} numberOfLines={1}>{destLabel}</Text>
-            <Text style={styles.tripMeta}>{distance} km</Text>
+            <Text style={styles.tripMeta}>{distance}</Text>
           </View>
 
           <View style={styles.divider} />
@@ -528,11 +717,9 @@ else router.replace('/user/(tabs)/home');}}>
           <View style={styles.tripDetailRow}>
             <Ionicons name="time-outline" size={18} color={Colors.textSecondary} />
             <Text style={styles.tripDetailLabel}>Duration</Text>
-            <Text style={styles.tripDetailValue}>{eta || '30 mins'}</Text>
+            <Text style={styles.tripDetailValue}>{eta || '...'}</Text>
           </View>
-
           <View style={styles.divider} />
-
           <View style={styles.tripDetailRow}>
             <Ionicons name="wallet-outline" size={18} color={Colors.textSecondary} />
             <Text style={styles.tripDetailLabel}>Fair estimate</Text>
@@ -541,12 +728,7 @@ else router.replace('/user/(tabs)/home');}}>
 
           <View style={styles.divider} />
 
-          {/* Full-width button in trip details too */}
-          <TouchableOpacity
-            style={styles.completeBtn}
-            onPress={handleCompleteDelivery}
-            activeOpacity={0.85}
-          >
+          <TouchableOpacity style={styles.completeBtn} onPress={handleCompleteDelivery} activeOpacity={0.85}>
             <Text style={styles.primaryBtnText}>Complete Delivery</Text>
           </TouchableOpacity>
         </Animated.View>
@@ -566,16 +748,64 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.12, shadowRadius: 4, elevation: 4, zIndex: 10,
   },
 
+  // ── Turn-by-turn banner ──
+  instructionBanner: {
+    position: 'absolute', top: Platform.OS === 'ios' ? 60 : 44,
+    left: 16, right: 16,
+    backgroundColor: Colors.primary, borderRadius: 16,
+    flexDirection: 'row', alignItems: 'center',
+    padding: 14, gap: 12, zIndex: 20,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2, shadowRadius: 8, elevation: 10,
+  },
+  instructionIconBox: {
+    width: 48, height: 48, borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  instructionTextBox: { flex: 1 },
+  instructionText: {
+    fontFamily: Fonts.poppins.semiBold, fontSize: 15,
+    color: Colors.white, lineHeight: 20,
+  },
+  instructionDistance: {
+    fontFamily: Fonts.poppins.regular, fontSize: 12,
+    color: 'rgba(255,255,255,0.7)', marginTop: 2,
+  },
+  nextStepBox: { alignItems: 'center', gap: 2 },
+  nextStepLabel: { fontFamily: Fonts.poppins.regular, fontSize: 10, color: 'rgba(255,255,255,0.6)' },
+
+  // ── ETA bar ──
+  etaBar: {
+    position: 'absolute', top: Platform.OS === 'ios' ? 136 : 120,
+    left: 16, right: 16,
+    backgroundColor: Colors.white, borderRadius: 14,
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1, shadowRadius: 6, elevation: 6, zIndex: 15,
+  },
+  etaItem: { flex: 1, alignItems: 'center' },
+  etaValue: { fontFamily: Fonts.poppins.bold, fontSize: 16, color: Colors.textPrimary },
+  etaLabel: { fontFamily: Fonts.poppins.regular, fontSize: 11, color: Colors.textSecondary },
+  etaSep: { width: 1, height: 32, backgroundColor: Colors.border, marginHorizontal: 8 },
+  etaExitBtn: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: Colors.lightGray,
+    alignItems: 'center', justifyContent: 'center', marginLeft: 8,
+  },
+
+  // ── Markers ──
   pickupMarker: {
     backgroundColor: '#10B981', padding: 10, borderRadius: 24,
     borderWidth: 3, borderColor: Colors.white,
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.2, shadowRadius: 4, elevation: 4,
   },
-
   destMarkerWrapper: { alignItems: 'center' },
   destMarkerBubble: {
-    backgroundColor: Colors.white, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8,
+    backgroundColor: Colors.white, borderRadius: 12,
+    paddingHorizontal: 12, paddingVertical: 8,
     flexDirection: 'row', alignItems: 'center', gap: 6,
     shadowColor: '#000', shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.15, shadowRadius: 6, elevation: 5,
@@ -586,7 +816,6 @@ const styles = StyleSheet.create({
     borderLeftColor: 'transparent', borderRightColor: 'transparent',
     borderTopColor: Colors.white, marginTop: -1,
   },
-avatar: { width: 44, height: 44, borderRadius: 22 },
   driverMarkerWrapper: { alignItems: 'center' },
   driverIconBox: {
     width: 44, height: 44, borderRadius: 12, backgroundColor: Colors.primary,
@@ -599,7 +828,7 @@ avatar: { width: 44, height: 44, borderRadius: 22 },
   driverNameText: { color: Colors.white, fontFamily: Fonts.poppins.semiBold, fontSize: 12 },
   driverDistText: { color: 'rgba(255,255,255,0.85)', fontFamily: Fonts.poppins.regular, fontSize: 10 },
 
-  // ── En route bottom card ──
+  // ── Bottom card ──
   bottomCard: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: Colors.white,
@@ -611,64 +840,60 @@ avatar: { width: 44, height: 44, borderRadius: 22 },
   },
   dragHandle: {
     width: 40, height: 4, backgroundColor: Colors.border,
-    borderRadius: 2, alignSelf: 'center', marginBottom: 16,
+    borderRadius: 2, alignSelf: 'center', marginBottom: 14,
   },
   cardTitle: {
-    fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary,
-    textAlign: 'center', marginBottom: 16,
+    fontFamily: Fonts.poppins.semiBold, fontSize: 16,
+    color: Colors.textPrimary, textAlign: 'center', marginBottom: 10,
   },
+  addressPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: `${Colors.primary}10`,
+    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10,
+  },
+  addressPillText: {
+    fontFamily: Fonts.poppins.regular, fontSize: 13,
+    color: Colors.textPrimary, flex: 1,
+  },
+  statsRow: { flexDirection: 'row', gap: 16, marginBottom: 12 },
+  statItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  statText: { fontFamily: Fonts.poppins.medium, fontSize: 13, color: Colors.textSecondary },
 
-  receiverRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  receiverRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
   avatarBox: {
     width: 44, height: 44, borderRadius: 22,
-    backgroundColor: Colors.lightGray, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: Colors.lightGray,
+    alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
   },
+  avatar: { width: 44, height: 44, borderRadius: 22 },
   receiverName: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.textPrimary },
   receiverSub: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary },
   viewDetailsBtn: { flexDirection: 'row', alignItems: 'center' },
   viewDetailsText: { fontFamily: Fonts.poppins.regular, fontSize: 11, color: Colors.textSecondary, marginLeft: 4 },
 
-  actionRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
-  chatBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: Colors.border, borderRadius: 12, paddingVertical: 12, gap: 8,
-  },
-  chatBtnText: { fontFamily: Fonts.poppins.medium, fontSize: 14, color: Colors.primary },
+  actionRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
   callBtn: {
-    width: 48, height: 48, borderRadius: 12, borderWidth: 1, borderColor: Colors.border,
+    width: 48, height: 48, borderRadius: 12,
+    borderWidth: 1, borderColor: Colors.border,
     alignItems: 'center', justifyContent: 'center',
   },
 
-  dropoffRow: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6,
-  },
-  dropoffLabel: { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.textSecondary },
-  seeTripText: { fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.primary },
-
-  addressLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
-  addressTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary },
-  addressSub: {
-    fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.textSecondary, marginBottom: 14,
-  },
-  priceInline: { fontFamily: Fonts.poppins.semiBold, color: Colors.textPrimary },
-
   primaryBtn: {
     backgroundColor: Colors.primary, borderRadius: 14, paddingVertical: 16,
-    alignItems: 'center', flexDirection: 'row', justifyContent: 'center',
+    alignItems: 'center', flexDirection: 'row', justifyContent: 'center', marginBottom: 4,
   },
   primaryBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.white },
-  secondaryBtn: { marginTop: 10, paddingVertical: 8, alignItems: 'center' },
+
+  secondaryRow: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'center', marginTop: 8, gap: 8,
+  },
+  secondaryBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 6 },
   secondaryBtnText: {
-    fontFamily: Fonts.poppins.regular, fontSize: 13,
+    fontFamily: Fonts.poppins.regular, fontSize: 12,
     color: Colors.textSecondary, textDecorationLine: 'underline',
   },
-
-  // Full-width taller "Complete Delivery" button — matches design
-  completeBtn: {
-    width: '100%', backgroundColor: Colors.primary,
-    borderRadius: 14, paddingVertical: 18,
-    alignItems: 'center', marginTop: 20,
-  },
+  secSep: { width: 1, height: 16, backgroundColor: Colors.border },
 
   // ── Arrived card ──
   arrivedCard: {
@@ -689,9 +914,17 @@ avatar: { width: 44, height: 44, borderRadius: 22 },
     width: 72, height: 72, borderRadius: 36, backgroundColor: Colors.primary,
     alignItems: 'center', justifyContent: 'center', marginBottom: 16,
   },
-  recipientRow: { flexDirection: 'row', gap: 16, marginTop: 4 },
+  addressLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+  addressTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary },
+  addressSub: { fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.textSecondary, marginBottom: 8 },
+  recipientRow: { flexDirection: 'row', gap: 16, marginTop: 4, marginBottom: 4 },
   recipientName: { fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.textSecondary },
   recipientPhone: { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.textPrimary },
+  completeBtn: {
+    width: '100%', backgroundColor: Colors.primary,
+    borderRadius: 14, paddingVertical: 18,
+    alignItems: 'center', marginTop: 20,
+  },
 
   // ── Trip details sheet ──
   tripDetailsCard: {
@@ -709,18 +942,14 @@ avatar: { width: 44, height: 44, borderRadius: 22 },
   },
   tripDetailsTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary },
   divider: { height: 1, backgroundColor: Colors.border, marginVertical: 14 },
-
   tripRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 4 },
   redDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: Colors.primary },
   tripAddressText: {
-    fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textPrimary,
-    marginLeft: 12, flex: 1,
+    fontFamily: Fonts.poppins.regular, fontSize: 14,
+    color: Colors.textPrimary, marginLeft: 12, flex: 1,
   },
   tripMeta: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary },
-  tripConnector: {
-    width: 1.5, height: 20, backgroundColor: Colors.border, marginLeft: 5, marginVertical: 2,
-  },
-
+  tripConnector: { width: 1.5, height: 20, backgroundColor: Colors.border, marginLeft: 5, marginVertical: 2 },
   tripDetailRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   tripDetailLabel: { fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textSecondary, flex: 1 },
   tripDetailValue: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: Colors.textPrimary },

@@ -1,3 +1,4 @@
+import QRCodeCard from '@/components/QRCodeCard';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
@@ -128,31 +129,28 @@ export default function FindingDriverScreen() {
   const { incrementUnread, clearUnread, unreadCounts } = useChatStore();
   const unreadCount = unreadCounts[deliveryId] ?? 0;
 
-  const bannerAnim = useRef(new Animated.Value(-130)).current;
-  const tripDetailsAnim = useRef(new Animated.Value(600)).current;
-  const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Dynamic banner content — default is delivery status, overridden for chat
-  const bannerTitleRef = useRef('');
-  const bannerBodyRef  = useRef('');
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const socketRef = useRef<Socket | null>(null);
-  const mapRef = useRef<MapView>(null);
+  const bannerAnim       = useRef(new Animated.Value(-130)).current;
+  const tripDetailsAnim  = useRef(new Animated.Value(600)).current;
+  const bannerTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bannerTitleRef   = useRef('');
+  const bannerBodyRef    = useRef('');
+  const pulseAnim        = useRef(new Animated.Value(1)).current;
+  const socketRef        = useRef<Socket | null>(null);
+  const mapRef           = useRef<MapView>(null);
 
-  // ── Refs for sync access inside socket handlers ──────────────────
-  const deliveryRef = useRef<DeliveryData | null>(null);
-  const driverReceivedRef = useRef(false);
-  const statusRef = useRef<DeliveryStatus>('finding_driver');
-  const userRef = useRef(user);
-  const driverRef = useRef<DriverInfo | null>(null);
-  // KEY: keep driverLocation in a ref so package_picked_up can read it
-  // synchronously without waiting for React state to update
-  const driverLocationRef = useRef<{ lat: number; lng: number } | null>(null);
-  const hasInitialFitRef = useRef(false);
+  const deliveryRef        = useRef<DeliveryData | null>(null);
+  const driverReceivedRef  = useRef(false);
+  const statusRef          = useRef<DeliveryStatus>('finding_driver');
+  const userRef            = useRef(user);
+  const driverRef          = useRef<DriverInfo | null>(null);
+  const driverLocationRef  = useRef<{ lat: number; lng: number } | null>(null);
+  const hasInitialFitRef   = useRef(false);
+
+  // ── FIX 1: Polling interval ref ────────────────────────────────
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { userRef.current = user; }, [user]);
   useEffect(() => { deliveryRef.current = delivery; }, [delivery]);
-  // Note: statusRef is also updated IMMEDIATELY in socket handlers
-  // so we don't depend on the async useEffect cycle for socket logic
   useEffect(() => { statusRef.current = status; }, [status]);
   useEffect(() => { driverRef.current = driver; }, [driver]);
   useEffect(() => { driverLocationRef.current = driverLocation; }, [driverLocation]);
@@ -175,6 +173,8 @@ export default function FindingDriverScreen() {
 
   useEffect(() => {
     if (!deliveryId) return;
+
+    // Reset all state for new delivery
     setStatus('finding_driver');
     setDriver(null);
     setPickupCode('');
@@ -190,19 +190,19 @@ export default function FindingDriverScreen() {
 
     fetchDelivery();
     connectSocket();
+    startPolling(); // ── FIX 2: Start polling immediately
 
     return () => {
       socketRef.current?.disconnect();
+      stopPolling(); // ── FIX 2: Clean up polling on unmount
       if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
     };
   }, [deliveryId]);
 
-  // When returning from minimize — restore state AND refetch route
   useFocusEffect(
     useCallback(() => {
       if (!deliveryId || !driverReceivedRef.current) return;
       fetchDelivery().then(() => {
-        // Refetch route using current driver location and correct target
         const loc = driverLocationRef.current;
         if (!loc) return;
         const d = deliveryRef.current;
@@ -215,6 +215,36 @@ export default function FindingDriverScreen() {
     }, [deliveryId])
   );
 
+  // ── FIX 2: Polling helpers ──────────────────────────────────────
+  // Polls every 3 seconds while status is finding_driver.
+  // Catches driver_assigned even when the socket event is missed
+  // (e.g. socket connected after the event was emitted, or old delivery
+  // room was still active when a new delivery was started).
+  const startPolling = () => {
+    if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+    pollingIntervalRef.current = setInterval(async () => {
+      if (statusRef.current !== 'finding_driver') {
+        stopPolling();
+        return;
+      }
+      try {
+        const { data } = await api.get(`/deliveries/${deliveryId}/status`);
+        if (data.success && data.data.status !== 'finding_driver') {
+          stopPolling();
+          fetchDelivery();
+        }
+      } catch (_) {}
+    }, 3000);
+  };
+
+  const stopPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  };
+
+  // ── Core fetch ──────────────────────────────────────────────────
   const fetchDelivery = async () => {
     try {
       const { data } = await api.get(`/deliveries/${deliveryId}/status`);
@@ -224,7 +254,7 @@ export default function FindingDriverScreen() {
 
         if (driverReceivedRef.current) {
           if (d.status !== statusRef.current) {
-            statusRef.current = d.status as DeliveryStatus; // sync immediately
+            statusRef.current = d.status as DeliveryStatus;
             setStatus(d.status as DeliveryStatus);
           }
           if (d.pickupCode) setPickupCode(d.pickupCode);
@@ -277,7 +307,6 @@ export default function FindingDriverScreen() {
     }
   };
 
-  // Fetches real road route from Google Directions and sets routeCoords
   const fetchRoute = async (fromLat: number, fromLng: number, toLat: number, toLng: number) => {
     if (!GOOGLE_MAPS_KEY) return;
     try {
@@ -298,6 +327,9 @@ export default function FindingDriverScreen() {
   };
 
   const connectSocket = () => {
+    // Disconnect any existing socket before creating a new one
+    socketRef.current?.disconnect();
+
     const socket = io(SOCKET_URL, {
       transports: ['polling', 'websocket'],
       extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
@@ -307,16 +339,19 @@ export default function FindingDriverScreen() {
     });
     socketRef.current = socket;
 
-    let isFirstConnect = true;
-
+    // ── FIX 3: Always fetch on connect, not just on reconnect ──────
+    // Previously used isFirstConnect flag which meant a missed event
+    // on first connect would never be recovered. Now we always fetch
+    // so any driver assignment that happened before socket connected
+    // is caught immediately.
     socket.on('connect', () => {
       const userId = userRef.current?.id;
       if (userId) socket.emit('join_user_room', { userId });
-      if (!isFirstConnect) fetchDelivery();
-      isFirstConnect = false;
+      fetchDelivery(); // always fetch — catches missed events
     });
 
     socket.on('driver_assigned', (payload) => {
+      stopPolling(); // ── FIX 2: Stop polling — socket caught it
       driverReceivedRef.current = true;
       setDriver(payload.driver);
       setPickupCode(payload.pickupCode ?? '');
@@ -330,7 +365,6 @@ export default function FindingDriverScreen() {
         if (pickupCoords) {
           setDriverDistance(calcDistance(loc, pickupCoords));
           setEta(calcEta(loc.lat, loc.lng, pickupCoords.lat, pickupCoords.lng));
-          // Route: driver current position → pickup
           fetchRoute(loc.lat, loc.lng, pickupCoords.lat, pickupCoords.lng);
 
           if (!hasInitialFitRef.current) {
@@ -360,14 +394,11 @@ export default function FindingDriverScreen() {
       driverLocationRef.current = loc;
       setDriverLocation(loc);
 
-      // statusRef is always updated synchronously in socket handlers
-      // so this correctly switches target when in_transit
       const isInTransit = statusRef.current === 'in_transit';
       const target = isInTransit
         ? deliveryRef.current?.recipient?.address?.coordinates
         : deliveryRef.current?.pickupAddress?.coordinates;
 
-      // Guard: only calculate if target has real coordinates (not 0,0 or undefined)
       if (target?.lat && target?.lng) {
         setDriverDistance(calcDistance(loc, target));
         setEta(calcEta(loc.lat, loc.lng, target.lat, target.lng));
@@ -383,28 +414,19 @@ export default function FindingDriverScreen() {
 
     socket.on('package_picked_up', (payload) => {
       setDeliveryCode(payload.deliveryCode ?? '');
-
-      // Update statusRef IMMEDIATELY — next driver_location uses recipient coords
       statusRef.current = 'in_transit';
       setStatus('in_transit');
-
       hasInitialFitRef.current = false;
-      setRouteCoords([]); // clear old route immediately
+      setRouteCoords([]);
 
       const recipient = deliveryRef.current?.recipient?.address?.coordinates;
       const driverLoc = driverLocationRef.current;
 
       if (driverLoc && recipient?.lat && recipient?.lng) {
-        // Immediately correct distance and ETA for recipient
         setDriverDistance(calcDistance(driverLoc, recipient));
         setEta(calcEta(driverLoc.lat, driverLoc.lng, recipient.lat, recipient.lng));
-
-        // Fetch real road route from driver's current position to recipient
         fetchRoute(driverLoc.lat, driverLoc.lng, recipient.lat, recipient.lng);
 
-        // Use animateToRegion instead of fitToCoordinates —
-        // fitToCoordinates with large bottom padding zooms in too aggressively.
-        // animateToRegion gives us explicit control over the zoom level.
         const midLat = (driverLoc.lat + recipient.lat) / 2;
         const midLng = (driverLoc.lng + recipient.lng) / 2;
         const latDelta = Math.max(Math.abs(driverLoc.lat - recipient.lat) * 2.2, 0.025);
@@ -420,11 +442,9 @@ export default function FindingDriverScreen() {
       showBanner();
     });
 
-    // Incoming chat message while user is on this screen but chat is closed
     socket.on('new_message', (msg: any) => {
       if (msg.senderType !== 'driver') return;
       incrementUnread(deliveryId, msg.message, 'driver');
-      // Show banner notification
       bannerTitleRef.current = '💬 New message from driver';
       bannerBodyRef.current = msg.message?.slice(0, 80) ?? 'You have a new message';
       showBanner();
@@ -448,14 +468,26 @@ export default function FindingDriverScreen() {
     });
 
     socket.on('no_drivers_available', () => {
-      setDriver(null);
-      setPickupCode('');
-      statusRef.current = 'finding_driver';
-      setStatus('finding_driver');
       Alert.alert(
-        'No Drivers Available',
-        'No drivers are nearby right now. Please try again shortly.',
-        [{ text: 'OK', onPress: () => router.replace('/user/(tabs)/home' as never) }]
+        'No Drivers Found',
+        'We could not find a driver nearby right now. Would you like to keep searching?',
+        [
+          {
+            text: 'Keep Searching',
+            onPress: () => {
+              api.post(`/deliveries/${deliveryId}/find-driver`).catch(() => {});
+            },
+          },
+          {
+            text: 'Cancel Delivery',
+            style: 'destructive',
+            onPress: async () => {
+              await api.post(`/deliveries/${deliveryId}/cancel`).catch(() => {});
+              router.replace('/user/(tabs)/home' as never);
+            },
+          },
+        ],
+        { cancelable: false }
       );
     });
 
@@ -560,20 +592,20 @@ export default function FindingDriverScreen() {
   };
 
   // ── Derived values ───────────────────────────────────────────────
-  const isSearching = status === 'finding_driver';
-  const hasDriver = !isSearching;
-  const pickupCoords = delivery?.pickupAddress?.coordinates;
+  const isSearching    = status === 'finding_driver';
+  const hasDriver      = !isSearching;
+  const pickupCoords   = delivery?.pickupAddress?.coordinates;
   const recipientCoords = delivery?.recipient?.address?.coordinates;
-  const targetCoords = status === 'in_transit' ? recipientCoords : pickupCoords;
+  const targetCoords   = status === 'in_transit' ? recipientCoords : pickupCoords;
 
   const mapRegion = {
-    latitude: pickupCoords?.lat ?? 6.5244,
+    latitude:  pickupCoords?.lat ?? 6.5244,
     longitude: pickupCoords?.lng ?? 3.3792,
     latitudeDelta: 0.022, longitudeDelta: 0.022,
   };
 
   const bannerTitle =
-    status === 'in_transit' ? 'Package Delivery Code'
+    status === 'in_transit'     ? 'Package Delivery Code'
     : status === 'driver_arrived' ? '🚗 Your driver is here!'
     : 'Your driver is on the way!';
 
@@ -586,19 +618,19 @@ export default function FindingDriverScreen() {
 
   const cardTitle =
     status === 'driver_arrived' ? 'Your driver is here'
-    : status === 'in_transit' ? 'Trip Started'
+    : status === 'in_transit'   ? 'Trip Started'
     : 'Your driver is on the way';
 
   const codeLabel = status === 'in_transit' ? 'Package Delivery Code' : 'Pick Up Code';
   const codeValue = status === 'in_transit' ? deliveryCode : pickupCode;
-  const codeDesc =
+  const codeDesc  =
     status === 'in_transit'
-      ? 'Share this code with the package receiver to confirm delivery'
-      : 'Give this code to the driver for order confirmation.';
+      ? 'Show this QR to the recipient to confirm delivery'
+      : 'Show this QR to your driver to confirm pickup';
 
-  const pickupLine1 = delivery?.pickupAddress?.label?.split(',')[0] ?? 'Pickup location';
-  const pickupLine2 = delivery?.pickupAddress?.label?.split(',').slice(1).join(',').trim() ?? '';
-  const priceDisplay = `₦${delivery?.price?.toLocaleString() ?? '0'}`;
+  const pickupLine1   = delivery?.pickupAddress?.label?.split(',')[0] ?? 'Pickup location';
+  const pickupLine2   = delivery?.pickupAddress?.label?.split(',').slice(1).join(',').trim() ?? '';
+  const priceDisplay  = `₦${delivery?.price?.toLocaleString() ?? '0'}`;
 
   const etaBadgeText =
     status === 'driver_arrived' ? 'Driver is here'
@@ -626,7 +658,6 @@ export default function FindingDriverScreen() {
           rotateEnabled={false}
           pitchEnabled={false}
         >
-          {/* Target marker */}
           {targetCoords && (
             <Marker
               coordinate={{ latitude: targetCoords.lat, longitude: targetCoords.lng }}
@@ -653,7 +684,6 @@ export default function FindingDriverScreen() {
             </Marker>
           )}
 
-          {/* Driver marker */}
           {driverLocation && hasDriver && (
             <Marker
               coordinate={{ latitude: driverLocation.lat, longitude: driverLocation.lng }}
@@ -676,7 +706,6 @@ export default function FindingDriverScreen() {
             </Marker>
           )}
 
-          {/* Road route — falls back to faded straight line while loading */}
           {hasDriver && (
             routeCoords.length > 0 ? (
               <Polyline
@@ -702,7 +731,10 @@ export default function FindingDriverScreen() {
         </MapView>
 
         {isSearching && (
-          <TouchableOpacity style={styles.backButton} onPress={() => router.replace('/user/(tabs)/home' as never)}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => router.replace('/user/(tabs)/home' as never)}
+          >
             <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
           </TouchableOpacity>
         )}
@@ -825,18 +857,25 @@ export default function FindingDriverScreen() {
 
             <View style={styles.divider} />
 
-            <View style={styles.codeRow}>
-              <View style={{ flex: 1, paddingRight: 12 }}>
-                <Text style={styles.codeLabel}>{codeLabel}</Text>
-                <Text style={styles.codeDesc}>{codeDesc}</Text>
+            {codeValue ? (
+              <View style={styles.qrSection}>
+                <QRCodeCard
+                  code={codeValue}
+                  title={codeLabel}
+                  subtitle={codeDesc}
+                />
               </View>
-              <View style={styles.codeValueRow}>
-                {status === 'in_transit' && (
-                  <Ionicons name="reload-outline" size={15} color={Colors.textSecondary} style={{ marginRight: 5 }} />
-                )}
-                <Text style={styles.codeValue}>{codeValue || '----'}</Text>
+            ) : (
+              <View style={styles.codeRow}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={styles.codeLabel}>{codeLabel}</Text>
+                  <Text style={styles.codeDesc}>Waiting for code...</Text>
+                </View>
+                <View style={styles.codeValueRow}>
+                  <Text style={styles.codeValue}>----</Text>
+                </View>
               </View>
-            </View>
+            )}
 
             <View style={styles.divider} />
 
@@ -1037,7 +1076,7 @@ const styles = StyleSheet.create({
   callBtn: { width: 48, height: 48, borderRadius: 12, borderWidth: 1, borderColor: Colors.border, alignItems: 'center', justifyContent: 'center' },
 
   divider: { height: 1, backgroundColor: Colors.border, marginVertical: 14 },
-
+  qrSection: { marginHorizontal: -20 },
   codeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   codeLabel: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: Colors.textPrimary, marginBottom: 4 },
   codeDesc: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, lineHeight: 17 },

@@ -2,6 +2,7 @@ import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
+import { HomeLogoIcon } from './HomeLogoIcon'; // adjust path to wherever you saved it
 
 export default function DriverTabsLayout() {
   return (
@@ -28,8 +29,8 @@ export default function DriverTabsLayout() {
         name="Home"
         options={{
           title: 'Home',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="home-outline" size={size} color={color} />
+          tabBarIcon: ({ color, focused, size }) => (
+            <HomeLogoIcon focused={focused} color={color} size={size} />
           ),
         }}
       />

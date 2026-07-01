@@ -30,6 +30,7 @@ export default function UserLayout() {
       <Stack.Screen name="add-funds" />
       <Stack.Screen name="chat" />
       <Stack.Screen name="ride-history" options={{ headerShown: false }} />
+      <Stack.Screen name="move-loads" options={{ headerShown: false }} />
     </Stack>
   );
 }

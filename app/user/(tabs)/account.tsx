@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Linking,
   Pressable,
   SafeAreaView,
   StyleSheet,
@@ -24,30 +25,35 @@ const CLOUDINARY_PRESET = 'pickar_profiles';
 const MenuItem = ({
   icon,
   label,
+  sublabel,
   onPress,
   danger,
+  rightElement,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
+  sublabel?: string;
   onPress: () => void;
   danger?: boolean;
+  rightElement?: React.ReactNode;
 }) => (
   <Pressable
     style={({ pressed }) => [styles.menuItem, pressed && styles.menuItemPressed]}
     onPress={onPress}
   >
-    <View style={styles.menuLeft}>
+    <View style={[styles.menuIconBox, danger && styles.menuIconBoxDanger]}>
       <Ionicons
         name={icon}
-        size={22}
-        color={danger ? Colors.error : Colors.textPrimary}
+        size={19}
+        color={danger ? Colors.error : Colors.primary}
       />
-      <Text style={[styles.menuLabel, danger && styles.menuLabelDanger]}>
-        {label}
-      </Text>
     </View>
-    {!danger && (
-      <Ionicons name="chevron-forward" size={18} color={Colors.textSecondary} />
+    <View style={styles.menuCenter}>
+      <Text style={[styles.menuLabel, danger && styles.menuLabelDanger]}>{label}</Text>
+      {sublabel && <Text style={styles.menuSublabel}>{sublabel}</Text>}
+    </View>
+    {rightElement ?? (
+      !danger && <Ionicons name="chevron-forward" size={17} color={Colors.textSecondary} />
     )}
   </Pressable>
 );
@@ -75,7 +81,11 @@ export default function AccountScreen() {
     try {
       const asset = result.assets[0];
       const formData = new FormData();
-      formData.append('file', { uri: asset.uri, type: asset.mimeType ?? 'image/jpeg', name: asset.fileName ?? 'photo.jpg' } as any);
+      formData.append('file', {
+        uri: asset.uri,
+        type: asset.mimeType ?? 'image/jpeg',
+        name: asset.fileName ?? 'photo.jpg',
+      } as any);
       formData.append('upload_preset', CLOUDINARY_PRESET);
       formData.append('folder', 'pickar/profiles');
 
@@ -110,6 +120,28 @@ export default function AccountScreen() {
     ]);
   };
 
+  const handleContactUs = () => {
+    Alert.alert(
+      'Contact Us',
+      'How would you like to reach us?',
+      [
+        {
+          text: 'Email Us',
+          onPress: () => Linking.openURL('mailto:support@pickar.ng?subject=Support Request'),
+        },
+        {
+          text: 'Call Us',
+          onPress: () => Linking.openURL('tel:+2348000000000'),
+        },
+        {
+          text: 'WhatsApp',
+          onPress: () => Linking.openURL('https://wa.me/2348000000000'),
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
   const avatarUri = user?.photo
     ? user.photo
     : `https://ui-avatars.com/api/?name=${encodeURIComponent(user?.name || 'U')}&background=8B1538&color=ffffff&size=128&bold=true`;
@@ -119,6 +151,7 @@ export default function AccountScreen() {
       <View style={styles.content}>
         <Text style={styles.title}>Account</Text>
 
+        {/* Profile section */}
         <View style={styles.profileSection}>
           <View style={styles.avatarWrapper}>
             <TouchableOpacity
@@ -128,6 +161,11 @@ export default function AccountScreen() {
               activeOpacity={0.85}
             >
               <Image source={{ uri: avatarUri }} style={styles.avatar} />
+              {uploadingPhoto && (
+                <View style={styles.avatarOverlay}>
+                  <ActivityIndicator color={Colors.white} />
+                </View>
+              )}
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.cameraBadge}
@@ -142,27 +180,49 @@ export default function AccountScreen() {
             </TouchableOpacity>
           </View>
           <Text style={styles.userName}>{user?.name || 'User'}</Text>
+          <Text style={styles.userEmail}>{user?.email || ''}</Text>
         </View>
 
+        {/* Account settings */}
         <View style={styles.section}>
           <MenuItem
             icon="person-outline"
             label="Personal Information"
+            sublabel="Name, phone, email"
             onPress={() => router.push('/user/account/your-profile')}
           />
           <View style={styles.divider} />
           <MenuItem
-            icon="shield-outline"
+            icon="shield-checkmark-outline"
             label="Security"
+            sublabel="Password & authentication"
             onPress={() => router.push('/user/account/security')}
           />
         </View>
 
+        {/* Support */}
+        <View style={styles.section}>
+          <MenuItem
+            icon="chatbubble-ellipses-outline"
+            label="Contact Us"
+            sublabel="Email, call or WhatsApp"
+            onPress={handleContactUs}
+          />
+          <View style={styles.divider} />
+          <MenuItem
+            icon="help-circle-outline"
+            label="Help & FAQ"
+            onPress={() => router.push('/user/account/help' as never)}
+          />
+        </View>
+
+        {/* Danger zone */}
         <View style={styles.section}>
           <MenuItem
             icon="log-out-outline"
             label="Log Out"
             onPress={handleLogout}
+            danger
           />
           <View style={styles.divider} />
           <MenuItem
@@ -172,13 +232,15 @@ export default function AccountScreen() {
             danger
           />
         </View>
+
+        <Text style={styles.version}>Pickar v1.0.0</Text>
       </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.white },
+  container: { flex: 1, backgroundColor: '#F9FAFB' },
   content: { flex: 1, paddingHorizontal: 20 },
   title: {
     fontSize: 26,
@@ -187,43 +249,75 @@ const styles = StyleSheet.create({
     marginTop: 16,
     marginBottom: 24,
   },
-  profileSection: { alignItems: 'center', marginBottom: 32 },
-  avatarWrapper: { position: 'relative', marginBottom: 12 },
+  profileSection: { alignItems: 'center', marginBottom: 28 },
+  avatarWrapper: { position: 'relative', marginBottom: 10 },
   avatarPressable: {
-    width: 80, height: 80, borderRadius: 40,
+    width: 84, height: 84, borderRadius: 42,
     overflow: 'hidden', backgroundColor: Colors.lightGray,
+    borderWidth: 3, borderColor: Colors.primary,
   },
   avatar: { width: '100%', height: '100%' },
+  avatarOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 42,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   cameraBadge: {
     position: 'absolute', bottom: 0, right: -2,
-    width: 24, height: 24, borderRadius: 12,
+    width: 26, height: 26, borderRadius: 13,
     backgroundColor: Colors.primary,
     justifyContent: 'center', alignItems: 'center',
     borderWidth: 2, borderColor: Colors.white,
   },
   userName: {
-    fontSize: 16,
+    fontSize: 17,
     fontFamily: Fonts.poppins.semiBold,
     color: Colors.textPrimary,
+    marginBottom: 2,
+  },
+  userEmail: {
+    fontSize: 13,
+    fontFamily: Fonts.poppins.regular,
+    color: Colors.textSecondary,
   },
   section: {
     backgroundColor: Colors.white,
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: Colors.border,
-    marginBottom: 16,
+    marginBottom: 14,
     overflow: 'hidden',
   },
   menuItem: {
     flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 16, paddingHorizontal: 16,
+    paddingVertical: 14, paddingHorizontal: 16, gap: 12,
   },
   menuItemPressed: { backgroundColor: Colors.lightGray },
-  menuLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  menuIconBox: {
+    width: 36, height: 36, borderRadius: 10,
+    backgroundColor: `${Colors.primary}12`,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  menuIconBoxDanger: {
+    backgroundColor: '#FEE2E2',
+  },
+  menuCenter: { flex: 1 },
   menuLabel: {
-    fontSize: 15, fontFamily: Fonts.poppins.regular, color: Colors.textPrimary,
+    fontSize: 15, fontFamily: Fonts.poppins.medium, color: Colors.textPrimary,
   },
   menuLabelDanger: { color: Colors.error },
+  menuSublabel: {
+    fontSize: 12, fontFamily: Fonts.poppins.regular,
+    color: Colors.textSecondary, marginTop: 1,
+  },
   divider: { height: 1, backgroundColor: Colors.border, marginHorizontal: 16 },
+  version: {
+    textAlign: 'center',
+    fontSize: 12,
+    fontFamily: Fonts.poppins.regular,
+    color: Colors.textSecondary,
+    marginTop: 8,
+  },
 });

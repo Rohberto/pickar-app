@@ -1,3 +1,4 @@
+import VehicleSetupModal from '@/components/VehicleSetupModal';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
@@ -58,7 +59,7 @@ interface IncomingRequest {
   deliveryId: string;
   userName: string;
   userPhoto?: string;
-  userPhone?: string;   // ← add this
+  userPhone?: string;
   recipientPhone?: string;
   pickupLabel: string;
   pickupCoords: { lat: number; lng: number };
@@ -84,10 +85,12 @@ export default function DriverHomeScreen() {
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [todayEarnings, setTodayEarnings] = useState(0);
   const [totalTrips, setTotalTrips] = useState(0);
+  const [driverRating, setDriverRating] = useState<string>('—');
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [vehicleInfo, setVehicleInfo] = useState<{ type: string; plateNumber: string } | null>(null);
+  const [showVehicleSetup, setShowVehicleSetup] = useState(false);
 
-  // Pulsing dot animation for "online & waiting" state
   const pulseAnim = useRef(new Animated.Value(1)).current;
-
   const socketRef = useRef<Socket | null>(null);
   const locationWatchRef = useRef<Location.LocationSubscription | null>(null);
   const locationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -99,7 +102,7 @@ export default function DriverHomeScreen() {
   const backdropAnim = useRef(new Animated.Value(0)).current;
   const isMountedRef = useRef(true);
 
-  // ─── Pulse animation (shows when online and waiting) ──────────────
+  // ─── Pulse animation ──────────────────────────────────────────────
   useEffect(() => {
     if (!isOnline) return;
     const loop = Animated.loop(
@@ -145,20 +148,33 @@ export default function DriverHomeScreen() {
       if (data.success) {
         setDriverProfileId(data.data._id);
         if (data.data.photo) setDriverPhoto(data.data.photo);
+        const avg = data.data.rating?.average;
+        setDriverRating(avg && avg > 0 ? String(avg.toFixed(1)) : '—');
+        if (data.data.vehicle?.type && data.data.vehicle?.plateNumber) {
+          setVehicleInfo(data.data.vehicle);
+        }
       }
     } catch (err) {
-      console.error('[DriverHome] fetchDriverProfile:', err);
+      console.error('Failed to fetch driver profile:', err);
+      if (err instanceof Error) {
+        console.log('[DriverHome] fetchDriverProfile:', err.message);
+      } else {
+        console.log('[DriverHome] fetchDriverProfile:', String(err));
+      }
+    } finally {
+      setProfileLoading(false);
     }
   };
-const fetchStats = async () => {
-  try {
-    const { data } = await api.get('/drivers/earnings');
-    if (data.success) {
-      setTodayEarnings(data.data.todayEarnings ?? 0);
-      setTotalTrips(data.data.allTimeRides ?? 0);  // ← all time
-    }
-  } catch (_) {}
-};
+
+  const fetchStats = async () => {
+    try {
+      const { data } = await api.get('/drivers/earnings');
+      if (data.success) {
+        setTodayEarnings(data.data.todayEarnings ?? 0);
+        setTotalTrips(data.data.allTimeRides ?? 0);
+      }
+    } catch (_) {}
+  };
 
   // ─── Active trip check ────────────────────────────────────────────
   const checkActiveTrip = async () => {
@@ -240,7 +256,11 @@ const fetchStats = async () => {
       const id = driverProfileIdRef.current;
       const loc = driverLocationRef.current;
       if (loc && id) {
-        socketRef.current?.emit('driver_location_update', { driverId: id, lat: loc.latitude, lng: loc.longitude });
+        socketRef.current?.emit('driver_location_update', {
+          driverId: id,
+          lat: loc.latitude,
+          lng: loc.longitude,
+        });
       }
     }, 5000);
   };
@@ -248,7 +268,10 @@ const fetchStats = async () => {
   const stopLocationTracking = () => {
     locationWatchRef.current?.remove();
     locationWatchRef.current = null;
-    if (locationIntervalRef.current) { clearInterval(locationIntervalRef.current); locationIntervalRef.current = null; }
+    if (locationIntervalRef.current) {
+      clearInterval(locationIntervalRef.current);
+      locationIntervalRef.current = null;
+    }
   };
 
   // ─── Socket ───────────────────────────────────────────────────────
@@ -256,7 +279,9 @@ const fetchStats = async () => {
     const socket = io(SOCKET_URL, {
       transports: ['polling', 'websocket'],
       extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
-      reconnection: true, reconnectionAttempts: 5, reconnectionDelay: 2000,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
     });
     socketRef.current = socket;
 
@@ -265,40 +290,64 @@ const fetchStats = async () => {
         const loc = driverLocationRef.current;
         socket.emit('driver_online', {
           driverId: driverProfileIdRef.current,
-          lat: loc?.latitude ?? 6.5244, lng: loc?.longitude ?? 3.3792,
+          lat: loc?.latitude ?? 6.5244,
+          lng: loc?.longitude ?? 3.3792,
         });
       }
     });
 
     socket.on('trip_offer', (payload: TripOffer) => {
-
       setIncomingRequest({
         deliveryId: payload.deliveryId,
         userName: payload.recipientName ?? 'Customer',
         userPhoto: payload.userPhoto,
-        userPhone: payload.userPhone ?? '',  // ← add this
+        userPhone: payload.userPhone ?? '',
         recipientPhone: payload.recipientPhone ?? '',
         pickupLabel: payload.pickup?.label ?? '',
         pickupCoords: payload.pickup?.coordinates ?? { lat: 0, lng: 0 },
         destLabel: payload.destination?.label ?? '',
         price: payload.price,
         estimatedDuration: payload.timeoutSeconds
-          ? `${Math.ceil(payload.timeoutSeconds / 60)} mins` : '30 mins',
+          ? `${Math.ceil(payload.timeoutSeconds / 60)} mins`
+          : '30 mins',
       });
       showSheet();
     });
   };
 
+  // ─── Go online logic (extracted so it can be called without depending on vehicleInfo state) ──
+  const goOnlineNow = async () => {
+    setIsOnline(true);
+    isOnlineRef.current = true;
+    try {
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      socketRef.current?.emit('driver_online', {
+        driverId: driverProfileId,
+        lat: loc.coords.latitude,
+        lng: loc.coords.longitude,
+      });
+      api.post('/drivers/online', {
+        lat: loc.coords.latitude,
+        lng: loc.coords.longitude,
+      }).catch(() => {});
+      startLocationTracking();
+    } catch {
+      // Location permission denied — still mark online, socket will update on next ping
+    }
+  };
+
   // ─── Online toggle ────────────────────────────────────────────────
   const handleToggleOnline = async (value: boolean) => {
-    setIsOnline(value);
-    isOnlineRef.current = value;
+    if (value && !vehicleInfo) {
+      // Vehicle info missing — show setup modal, do not go online yet
+      setShowVehicleSetup(true);
+      return;
+    }
     if (value) {
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      socketRef.current?.emit('driver_online', { driverId: driverProfileId, lat: loc.coords.latitude, lng: loc.coords.longitude });
-      api.post('/drivers/online', { lat: loc.coords.latitude, lng: loc.coords.longitude }).catch(() => {});
-      startLocationTracking();
+      await goOnlineNow();
     } else {
+      setIsOnline(false);
+      isOnlineRef.current = false;
       socketRef.current?.emit('driver_offline', { driverId: driverProfileId });
       api.post('/drivers/offline').catch(() => {});
       stopLocationTracking();
@@ -324,20 +373,22 @@ const fetchStats = async () => {
     try {
       const asset = result.assets[0];
       const formData = new FormData();
-      formData.append('file', { uri: asset.uri, type: asset.mimeType ?? 'image/jpeg', name: asset.fileName ?? 'photo.jpg' } as any);
+      formData.append('file', {
+        uri: asset.uri,
+        type: asset.mimeType ?? 'image/jpeg',
+        name: asset.fileName ?? 'photo.jpg',
+      } as any);
       formData.append('upload_preset', CLOUDINARY_PRESET);
       formData.append('folder', 'pickar/drivers');
 
-      const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`, {
-        method: 'POST', body: formData,
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      const res = await fetch(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
+        { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } }
+      );
       const data = await res.json();
       if (!data.secure_url) throw new Error(data.error?.message ?? 'Upload failed');
 
-      // Save to driver profile on backend
       await api.patch('/drivers/me', { photo: data.secure_url });
-      // Update local state + auth store
       setDriverPhoto(data.secure_url);
       if (user) setUser({ ...user, photo: data.secure_url });
       Alert.alert('Success', 'Profile photo updated!');
@@ -375,21 +426,21 @@ const fetchStats = async () => {
       setActiveTrips(prev => [...prev, deliveryId]);
       hideSheet();
       if (!isAdditional) {
-       router.push({
-  pathname: '/driver/navigate-pickup',
-  params: {
-    deliveryId,
-    userName: incomingRequest.userName,
-    userPhoto: incomingRequest.userPhoto ?? '',
-    recipientPhone: incomingRequest.recipientPhone ?? '',
-    userPhone: incomingRequest.userPhone ?? '',
-    pickupLabel: incomingRequest.pickupLabel,
-    pickupLat: String(incomingRequest.pickupCoords.lat),
-    pickupLng: String(incomingRequest.pickupCoords.lng),
-    destLabel: incomingRequest.destLabel,
-    price: String(incomingRequest.price),
-  },
-} as never);
+        router.push({
+          pathname: '/driver/navigate-pickup',
+          params: {
+            deliveryId,
+            userName: incomingRequest.userName,
+            userPhoto: incomingRequest.userPhoto ?? '',
+            recipientPhone: incomingRequest.recipientPhone ?? '',
+            userPhone: incomingRequest.userPhone ?? '',
+            pickupLabel: incomingRequest.pickupLabel,
+            pickupLat: String(incomingRequest.pickupCoords.lat),
+            pickupLng: String(incomingRequest.pickupCoords.lng),
+            destLabel: incomingRequest.destLabel,
+            price: String(incomingRequest.price),
+          },
+        } as never);
       }
     } catch (err) {
       console.error('[DriverHome] accept error:', err);
@@ -426,12 +477,12 @@ const fetchStats = async () => {
         initialRegion={{
           latitude: driverLocation?.latitude ?? 6.5244,
           longitude: driverLocation?.longitude ?? 3.3792,
-          latitudeDelta: 0.02, longitudeDelta: 0.02,
+          latitudeDelta: 0.02,
+          longitudeDelta: 0.02,
         }}
       >
         {driverLocation && (
           <Marker coordinate={driverLocation} anchor={{ x: 0.5, y: 1 }} tracksViewChanges={false}>
-            {/* Wine location pin */}
             <View style={styles.pinContainer}>
               <View style={styles.pinBody}>
                 <View style={styles.pinDot} />
@@ -444,7 +495,6 @@ const fetchStats = async () => {
 
       {/* ── FLOATING HEADER ─────────────────────────────────────── */}
       <View style={styles.header}>
-        {/* Avatar + camera badge */}
         <View style={styles.avatarContainer}>
           <TouchableOpacity
             style={styles.avatarPressable}
@@ -464,18 +514,18 @@ const fetchStats = async () => {
           </TouchableOpacity>
         </View>
 
-        {/* Online toggle */}
         <View style={styles.onlineRow}>
           <Switch
             value={isOnline}
             onValueChange={handleToggleOnline}
+            disabled={profileLoading}
             trackColor={{ false: Colors.border, true: Colors.primary }}
             thumbColor={Colors.white}
             ios_backgroundColor={Colors.border}
             style={styles.switch}
           />
           <Text style={[styles.onlineLabel, isOnline && styles.onlineLabelActive]}>
-            {isOnline ? 'Online' : 'Offline'}
+            {profileLoading ? 'Loading...' : isOnline ? 'Online' : 'Offline'}
           </Text>
         </View>
 
@@ -501,15 +551,13 @@ const fetchStats = async () => {
         />
         <View style={styles.dragHandle} />
 
-        {/* Greeting */}
         <View style={styles.greetingRow}>
           <View>
             <Text style={styles.greetingHi}>Hi {firstName} 👋</Text>
             <Text style={styles.greetingSub}>
-              {isOnline ? 'You\'re online — waiting for requests' : 'Go online to start receiving requests'}
+              {isOnline ? "You're online — waiting for requests" : 'Go online to start receiving requests'}
             </Text>
           </View>
-          {/* Pulse dot when online */}
           {isOnline && (
             <Animated.View style={[styles.onlinePulseOuter, { transform: [{ scale: pulseAnim }] }]}>
               <View style={styles.onlinePulseDot} />
@@ -517,7 +565,6 @@ const fetchStats = async () => {
           )}
         </View>
 
-        {/* Stats row */}
         <View style={styles.statsRow}>
           <View style={styles.statCard}>
             <Ionicons name="cash-outline" size={20} color="rgba(255,255,255,0.7)" />
@@ -525,30 +572,25 @@ const fetchStats = async () => {
             <Text style={styles.statLabel}>Today's earnings</Text>
           </View>
           <View style={styles.statDivider} />
-
           <View style={styles.statCard}>
             <Ionicons name="bicycle-outline" size={20} color="rgba(255,255,255,0.7)" />
             <Text style={styles.statValue}>{totalTrips}</Text>
-            <Text style={styles.statLabel}>Total rides</Text> 
+            <Text style={styles.statLabel}>Total rides</Text>
           </View>
-
           <View style={styles.statDivider} />
           <View style={styles.statCard}>
             <Ionicons name="star-outline" size={20} color="rgba(255,255,255,0.7)" />
-            <Text style={styles.statValue}>4.8</Text>
+            <Text style={styles.statValue}>{driverRating}</Text>
             <Text style={styles.statLabel}>Rating</Text>
           </View>
         </View>
 
-        {/* CTA button */}
         {isOnline ? (
-          // When online — show animated "waiting" state, not a dead button
           <View style={styles.waitingBox}>
             <ActivityIndicator color="rgba(255,255,255,0.7)" size="small" />
             <Text style={styles.waitingText}>Listening for nearby delivery requests...</Text>
           </View>
         ) : (
-          // When offline — prominent "Go Online" button
           <TouchableOpacity
             style={styles.goOnlineBtn}
             onPress={() => handleToggleOnline(true)}
@@ -560,12 +602,13 @@ const fetchStats = async () => {
         )}
       </View>
 
-      {/* ── BACKDROP ─────────────────────────────────────────────── */}
       {incomingRequest && (
-        <Animated.View style={[styles.backdrop, { opacity: backdropAnim }]} pointerEvents="none" />
+        <Animated.View
+          style={[styles.backdrop, { opacity: backdropAnim }]}
+          pointerEvents="none"
+        />
       )}
 
-      {/* ── INCOMING REQUEST SHEET ──────────────────────────────── */}
       {incomingRequest && (
         <Animated.View style={[styles.requestSheet, { transform: [{ translateY: sheetAnim }] }]}>
           <View style={styles.sheetDragHandle} />
@@ -580,7 +623,9 @@ const fetchStats = async () => {
           <View style={styles.sheetHeaderRow}>
             <View style={{ flex: 1, paddingRight: 12 }}>
               <Text style={styles.sheetTitle}>Ride request – Delivery</Text>
-              <Text style={styles.sheetSubtitle}>{incomingRequest.userName} wants to deliver a package</Text>
+              <Text style={styles.sheetSubtitle}>
+                {incomingRequest.userName} wants to deliver a package
+              </Text>
             </View>
             <View style={styles.durationBadge}>
               <Text style={styles.durationText}>{incomingRequest.estimatedDuration} Trip</Text>
@@ -609,12 +654,16 @@ const fetchStats = async () => {
 
           <View style={styles.addressRow}>
             <View style={styles.redDot} />
-            <Text style={styles.addressLabel} numberOfLines={1}>{incomingRequest.pickupLabel}</Text>
+            <Text style={styles.addressLabel} numberOfLines={1}>
+              {incomingRequest.pickupLabel}
+            </Text>
           </View>
           <View style={styles.routeConnector} />
           <View style={styles.addressRow}>
             <Ionicons name="location" size={16} color={Colors.textPrimary} />
-            <Text style={[styles.addressLabel, { marginLeft: 12, flex: 1 }]} numberOfLines={1}>{incomingRequest.destLabel}</Text>
+            <Text style={[styles.addressLabel, { marginLeft: 12, flex: 1 }]} numberOfLines={1}>
+              {incomingRequest.destLabel}
+            </Text>
           </View>
 
           <View style={styles.divider} />
@@ -628,7 +677,11 @@ const fetchStats = async () => {
           <View style={styles.divider} />
 
           <View style={styles.actionRow}>
-            <Pressable style={styles.declineBtn} onPress={handleDecline} disabled={accepting}>
+            <Pressable
+              style={styles.declineBtn}
+              onPress={handleDecline}
+              disabled={accepting}
+            >
               <Text style={styles.declineBtnText}>Decline</Text>
             </Pressable>
             <Pressable
@@ -643,6 +696,20 @@ const fetchStats = async () => {
           </View>
         </Animated.View>
       )}
+
+      {/* ── VEHICLE SETUP MODAL ──────────────────────────────────── */}
+      {/* Fires when driver tries to go online without vehicle info  */}
+      {/* onComplete calls goOnlineNow() directly — bypasses the     */}
+      {/* vehicleInfo state check which would still be null due to   */}
+      {/* React's async state batching.                              */}
+      <VehicleSetupModal
+        visible={showVehicleSetup}
+        onComplete={(vehicle) => {
+          setVehicleInfo(vehicle);   // saves for future toggles
+          setShowVehicleSetup(false);
+          goOnlineNow();             // go online directly, no state dependency
+        }}
+      />
     </View>
   );
 }
@@ -650,7 +717,6 @@ const fetchStats = async () => {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f3f4f6' },
 
-  // ── Location pin ──────────────────────────────────────────────
   pinContainer: { alignItems: 'center' },
   pinBody: {
     width: 28, height: 28, borderRadius: 14,
@@ -662,10 +728,15 @@ const styles = StyleSheet.create({
     shadowColor: Colors.primary, shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4, shadowRadius: 6, elevation: 6,
   },
-  pinDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#fff', transform: [{ rotate: '-45deg' }] },
-  pinShadow: { width: 12, height: 5, borderRadius: 6, backgroundColor: 'rgba(134,19,19,0.25)', marginTop: 1 },
+  pinDot: {
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: '#fff', transform: [{ rotate: '-45deg' }],
+  },
+  pinShadow: {
+    width: 12, height: 5, borderRadius: 6,
+    backgroundColor: 'rgba(134,19,19,0.25)', marginTop: 1,
+  },
 
-  // ── Header ────────────────────────────────────────────────────
   header: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 56 : 40,
@@ -692,7 +763,10 @@ const styles = StyleSheet.create({
   },
   onlineRow: { flex: 1, flexDirection: 'row', alignItems: 'center', marginLeft: 8 },
   switch: { transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] },
-  onlineLabel: { fontFamily: Fonts.poppins.medium, fontSize: 13, color: Colors.textSecondary, marginLeft: 4 },
+  onlineLabel: {
+    fontFamily: Fonts.poppins.medium, fontSize: 13,
+    color: Colors.textSecondary, marginLeft: 4,
+  },
   onlineLabelActive: { color: Colors.textPrimary },
   activeTripBadge: {
     flexDirection: 'row', alignItems: 'center',
@@ -702,7 +776,6 @@ const styles = StyleSheet.create({
   activeTripText: { fontFamily: Fonts.poppins.semiBold, fontSize: 11, color: Colors.white },
   bellWrap: { marginLeft: 4, padding: 4 },
 
-  // ── Gradient bottom sheet ─────────────────────────────────────
   bottomSheet: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
@@ -716,10 +789,14 @@ const styles = StyleSheet.create({
     borderRadius: 2, alignSelf: 'center', marginBottom: 18,
   },
   greetingRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20,
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', marginBottom: 20,
   },
   greetingHi: { fontFamily: Fonts.poppins.semiBold, fontSize: 18, color: '#fff' },
-  greetingSub: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 2 },
+  greetingSub: {
+    fontFamily: Fonts.poppins.regular, fontSize: 12,
+    color: 'rgba(255,255,255,0.6)', marginTop: 2,
+  },
   onlinePulseOuter: {
     width: 36, height: 36, borderRadius: 18,
     backgroundColor: 'rgba(255,255,255,0.15)',
@@ -727,11 +804,10 @@ const styles = StyleSheet.create({
   },
   onlinePulseDot: {
     width: 16, height: 16, borderRadius: 8,
-    backgroundColor: '#4ADE80', // green = active/online
+    backgroundColor: '#4ADE80',
     borderWidth: 2, borderColor: 'rgba(255,255,255,0.5)',
   },
 
-  // Stats
   statsRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.1)',
@@ -740,17 +816,22 @@ const styles = StyleSheet.create({
   },
   statCard: { flex: 1, alignItems: 'center', gap: 4 },
   statValue: { fontFamily: Fonts.poppins.bold, fontSize: 16, color: '#fff' },
-  statLabel: { fontFamily: Fonts.poppins.regular, fontSize: 10, color: 'rgba(255,255,255,0.55)', textAlign: 'center' },
+  statLabel: {
+    fontFamily: Fonts.poppins.regular, fontSize: 10,
+    color: 'rgba(255,255,255,0.55)', textAlign: 'center',
+  },
   statDivider: { width: 1, height: 40, backgroundColor: 'rgba(255,255,255,0.15)' },
 
-  // CTA states
   waitingBox: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderRadius: 14, paddingVertical: 16,
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
   },
-  waitingText: { fontFamily: Fonts.poppins.regular, fontSize: 13, color: 'rgba(255,255,255,0.7)' },
+  waitingText: {
+    fontFamily: Fonts.poppins.regular, fontSize: 13,
+    color: 'rgba(255,255,255,0.7)',
+  },
   goOnlineBtn: {
     backgroundColor: '#fff', borderRadius: 14,
     paddingVertical: 16, alignItems: 'center',
@@ -758,8 +839,10 @@ const styles = StyleSheet.create({
   },
   goOnlineBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: '#9B1515' },
 
-  // ── Incoming request sheet ────────────────────────────────────
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)', zIndex: 20 },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.35)', zIndex: 20,
+  },
   requestSheet: {
     position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 30,
     backgroundColor: Colors.white,
@@ -779,28 +862,53 @@ const styles = StyleSheet.create({
     backgroundColor: `${Colors.primary}15`,
     borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 14,
   },
-  multiPkgText: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.primary, flex: 1 },
-  sheetHeaderRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14 },
+  multiPkgText: {
+    fontFamily: Fonts.poppins.regular, fontSize: 12,
+    color: Colors.primary, flex: 1,
+  },
+  sheetHeaderRow: {
+    flexDirection: 'row', alignItems: 'flex-start',
+    justifyContent: 'space-between', marginBottom: 14,
+  },
   sheetTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary },
-  sheetSubtitle: { fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
-  durationBadge: { backgroundColor: Colors.lightGray, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20 },
+  sheetSubtitle: {
+    fontFamily: Fonts.poppins.regular, fontSize: 13,
+    color: Colors.textSecondary, marginTop: 2,
+  },
+  durationBadge: {
+    backgroundColor: Colors.lightGray,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20,
+  },
   durationText: { fontFamily: Fonts.poppins.semiBold, fontSize: 12, color: Colors.textPrimary },
   divider: { height: 1, backgroundColor: Colors.border, marginVertical: 14 },
   userRow: { flexDirection: 'row', alignItems: 'center' },
   userAvatarBox: {
     width: 44, height: 44, borderRadius: 22,
-    backgroundColor: Colors.lightGray, alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+    backgroundColor: Colors.lightGray,
+    alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
   },
   userAvatar: { width: 44, height: 44, borderRadius: 22 },
   userName: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.textPrimary },
   viewProfileBtn: { flexDirection: 'row', alignItems: 'center' },
-  viewProfileText: { fontFamily: Fonts.poppins.regular, fontSize: 11, color: Colors.textSecondary, marginLeft: 4 },
+  viewProfileText: {
+    fontFamily: Fonts.poppins.regular, fontSize: 11,
+    color: Colors.textSecondary, marginLeft: 4,
+  },
   addressRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 4 },
   redDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: Colors.primary },
-  addressLabel: { fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textPrimary, marginLeft: 12, flex: 1 },
-  routeConnector: { width: 1.5, height: 14, backgroundColor: Colors.border, marginLeft: 5, marginVertical: 2 },
+  addressLabel: {
+    fontFamily: Fonts.poppins.regular, fontSize: 14,
+    color: Colors.textPrimary, marginLeft: 12, flex: 1,
+  },
+  routeConnector: {
+    width: 1.5, height: 14, backgroundColor: Colors.border,
+    marginLeft: 5, marginVertical: 2,
+  },
   priceRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  priceLabel: { fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textSecondary, flex: 1 },
+  priceLabel: {
+    fontFamily: Fonts.poppins.regular, fontSize: 14,
+    color: Colors.textSecondary, flex: 1,
+  },
   priceValue: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary },
   actionRow: { flexDirection: 'row', gap: 12, marginTop: 4 },
   declineBtn: {
@@ -808,6 +916,9 @@ const styles = StyleSheet.create({
     borderRadius: 14, borderWidth: 1.5, borderColor: Colors.primary,
   },
   declineBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.primary },
-  acceptBtn: { flex: 2, paddingVertical: 15, alignItems: 'center', borderRadius: 14, backgroundColor: Colors.primary },
+  acceptBtn: {
+    flex: 2, paddingVertical: 15, alignItems: 'center',
+    borderRadius: 14, backgroundColor: Colors.primary,
+  },
   acceptBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.white },
 });

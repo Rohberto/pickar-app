@@ -1,9 +1,9 @@
-
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
-import { Image } from 'react-native';
+import { HomeLogoIcon } from './HomeLogoIcon';
+
 export default function UserTabLayout() {
   return (
     <Tabs
@@ -25,20 +25,16 @@ export default function UserTabLayout() {
         },
       }}
     >
-     <Tabs.Screen
-  name="home"
-  options={{
-    title: 'Home',
-    tabBarIcon: ({ size }) => (
-      <Image
-        source={require('@/assets/images/home.png')}
-        style={{ width: size, height: size }}
-        resizeMode="contain"
+      <Tabs.Screen
+        name="home"
+        options={{
+          title: 'Home',
+          tabBarIcon: ({ color, focused, size }) => (
+            <HomeLogoIcon focused={focused} color={color} size={size} />
+          ),
+        }}
       />
-    ),
-  }}
-/>
-           <Tabs.Screen
+      <Tabs.Screen
         name="wallet"
         options={{
           title: 'Wallet',

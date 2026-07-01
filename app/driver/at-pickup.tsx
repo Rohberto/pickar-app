@@ -1,4 +1,5 @@
 import ChatButton from '@/components/ChatButton';
+import QRScanner from '@/components/QRScanner';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import api from '@/services/api';
@@ -6,7 +7,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   Linking,
   Platform,
@@ -35,23 +35,22 @@ export default function AtPickupScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
 
-  const deliveryId = params.deliveryId as string;
-  const userName = params.userName as string;
-  const userPhoto = params.userPhoto as string;
-  const userPhone = params.userPhone as string;
-const recipientPhone = params.recipientPhone as string;
-  const pickupLat = parseFloat(params.pickupLat as string) || 6.5244;
-  const pickupLng = parseFloat(params.pickupLng as string) || 3.3792;
+  const deliveryId    = params.deliveryId    as string;
+  const userName      = params.userName      as string;
+  const userPhoto     = params.userPhoto     as string;
+  const userPhone     = params.userPhone     as string;
+  const recipientPhone = params.recipientPhone as string;
+  const pickupLat     = parseFloat(params.pickupLat as string) || 6.5244;
+  const pickupLng     = parseFloat(params.pickupLng as string) || 3.3792;
 
-  const [loading, setLoading] = useState(false);
   const [driverProfileId, setDriverProfileId] = useState<string | null>(null);
+  // QR scanner visibility
+  const [scannerVisible, setScannerVisible] = useState(false);
+  const [verifying, setVerifying] = useState(false);
 
-  const socketRef = useRef<Socket | null>(null);
+  const socketRef          = useRef<Socket | null>(null);
   const driverProfileIdRef = useRef<string | null>(null);
-
-  // isMountedRef — prevents stale socket events from navigating
-  // after the screen has already unmounted
-  const isMountedRef = useRef(false);
+  const isMountedRef       = useRef(false);
 
   // ─── Mount ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -65,18 +64,14 @@ const recipientPhone = params.recipientPhone as string;
     };
   }, []);
 
-  // ─── Keep ref in sync ────────────────────────────────────────────
-  useEffect(() => {
-    driverProfileIdRef.current = driverProfileId;
-  }, [driverProfileId]);
+  useEffect(() => { driverProfileIdRef.current = driverProfileId; }, [driverProfileId]);
 
-  // ─── Join driver room once profile id is loaded ──────────────────
   useEffect(() => {
     if (!driverProfileId) return;
     socketRef.current?.emit('join_driver_room', { driverId: driverProfileId });
   }, [driverProfileId]);
 
-  // ─── Fetch Driver profile ─────────────────────────────────────────
+  // ─── Driver profile ───────────────────────────────────────────────
   const fetchDriverProfile = async () => {
     try {
       const { data } = await api.get('/drivers/me');
@@ -95,57 +90,116 @@ const recipientPhone = params.recipientPhone as string;
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('[AtPickup] Socket connected');
       if (driverProfileIdRef.current) {
         socket.emit('join_driver_room', { driverId: driverProfileIdRef.current });
       }
     });
 
-    // User cancelled while driver is at pickup
-    // isMountedRef guard prevents "navigate before mounting" error
     socket.on('trip_cancelled', () => {
       if (!isMountedRef.current) return;
-      Alert.alert(
-        'Trip Cancelled',
-        'The user has cancelled this trip.',
-        [{
-          text: 'OK',
-          onPress: () => {
-            // setTimeout ensures Root Layout is fully mounted before navigation
-            setTimeout(() => {
-              router.replace('/driver/(tabs)/Home' as never);
-            }, 300);
-          },
-        }]
-      );
+      Alert.alert('Trip Cancelled', 'The user has cancelled this trip.', [{
+        text: 'OK',
+        onPress: () => setTimeout(() => router.replace('/driver/(tabs)/Home' as never), 300),
+      }]);
     });
   };
 
   // ─── Notify user of arrival ───────────────────────────────────────
   const notifyUserOfArrival = async () => {
     try {
-      console.log('[AtPickup] Calling driver-arrived for:', deliveryId);
-      const { data } = await api.post(`/deliveries/${deliveryId}/driver-arrived`);
-      console.log('[AtPickup] driver-arrived response:', data);
+      await api.post(`/deliveries/${deliveryId}/driver-arrived`);
     } catch (err) {
       console.error('[AtPickup] notifyUserOfArrival:', err);
     }
   };
 
-  // ─── Actions ──────────────────────────────────────────────────────
-  const handleCallUser = () => {
-    Linking.openURL('tel:').catch(() => {});
-  };
-
-  const handleStartDelivery = async () => {
-    setLoading(true);
+  // ─── QR scan handler ─────────────────────────────────────────────
+  const handleQRScanned = async (scannedCode: string) => {
+    setScannerVisible(false);
+    setVerifying(true);
     try {
-      router.push({
-        pathname: '/driver/confirm-pickup',
-        params: { deliveryId, userName, userPhoto, userPhone, recipientPhone },
+      // Step 1 — verify pickup code (same endpoint as confirm-pickup.tsx)
+      const verifyRes = await api.post(`/deliveries/${deliveryId}/verify-pickup`, {
+        pickupCode: scannedCode,   // ← field name must be pickupCode not code
+      });
+      if (!verifyRes.data?.success) {
+        Alert.alert(
+          'Wrong QR Code',
+          'This code did not match. Ask the customer to show their pickup QR again.',
+          [{ text: 'Try Again', onPress: () => setScannerVisible(true) }]
+        );
+        return;
+      }
+
+      // Step 2 — fetch all active deliveries to decide routing
+      const tripsRes = await api.get('/drivers/active-trips');
+      const allTrips: any[] = tripsRes.data?.data ?? [];
+
+      // Packages still waiting to be picked up
+      const pendingPickups = allTrips.filter(
+        (d: any) => d.status === 'driver_assigned' && d._id !== deliveryId
+      );
+
+      if (pendingPickups.length > 0) {
+        // More pickups remaining — go to next one
+        const next = pendingPickups[0];
+        router.replace({
+          pathname: '/driver/navigate-pickup',
+          params: {
+            deliveryId: next._id,
+            userName: next.recipient?.name ?? '',
+            userPhoto: '',
+            pickupLabel: next.pickupAddress?.label ?? '',
+            pickupLat: String(next.pickupAddress?.coordinates?.lat ?? 6.5244),
+            pickupLng: String(next.pickupAddress?.coordinates?.lng ?? 3.3792),
+            destLabel: next.recipient?.address?.label ?? '',
+            price: String(next.price ?? 0),
+          },
+        } as never);
+        return;
+      }
+
+      // All picked up — fetch current delivery details with retry
+      let currentDelivery: any = null;
+      for (let i = 1; i <= 3; i++) {
+        try {
+          const res = await api.get(`/deliveries/${deliveryId}/status`);
+          currentDelivery = res.data?.data;
+          if (currentDelivery) break;
+        } catch (_) {}
+        if (i < 3) await new Promise(r => setTimeout(r, 500));
+      }
+      if (!currentDelivery) throw new Error('Could not load delivery details');
+
+      const toDeliver = allTrips.filter((d: any) => d.status === 'in_transit');
+      const firstDelivery = toDeliver.length > 0 ? toDeliver[0] : currentDelivery;
+      const isThis = firstDelivery._id === deliveryId || !firstDelivery._id;
+      const d = isThis ? currentDelivery : firstDelivery;
+
+      router.replace({
+        pathname: '/driver/navigate-delivery',
+        params: {
+          userName,
+          userPhoto,
+          userPhone,
+          deliveryId: isThis ? deliveryId : d._id,
+          deliveryCode: isThis ? (verifyRes.data.data?.deliveryCode ?? '') : (d.deliveryCode ?? ''),
+          destLabel: d.recipient?.address?.label ?? '',
+          destLat: String(d.recipient?.address?.coordinates?.lat ?? 6.5244),
+          destLng: String(d.recipient?.address?.coordinates?.lng ?? 3.3792),
+          recipientName: d.recipient?.name ?? '',
+          recipientPhone: d.recipient?.phone ?? recipientPhone,
+          price: String(d.price ?? 0),
+          pickupLabel: d.pickupAddress?.label ?? '',
+          pickupLat: String(d.pickupAddress?.coordinates?.lat ?? 6.5244),
+          pickupLng: String(d.pickupAddress?.coordinates?.lng ?? 3.3792),
+        },
       } as never);
+
+    } catch (err: any) {
+      Alert.alert('Error', err?.response?.data?.message || err.message || 'Could not verify pickup. Try again.');
     } finally {
-      setLoading(false);
+      setVerifying(false);
     }
   };
 
@@ -185,8 +239,13 @@ const recipientPhone = params.recipientPhone as string;
         </Marker>
       </MapView>
 
-      <TouchableOpacity style={styles.backButton}  onPress={() => {if (router.canGoBack()) router.back();
-else router.replace('/user/(tabs)/home');}}>
+      <TouchableOpacity
+        style={styles.backButton}
+        onPress={() => {
+          if (router.canGoBack()) router.back();
+          else router.replace('/user/(tabs)/home' as never);
+        }}
+      >
         <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
       </TouchableOpacity>
 
@@ -206,15 +265,18 @@ else router.replace('/user/(tabs)/home');}}>
         <View style={styles.divider} />
 
         <View style={styles.actionRow}>
-                  <ChatButton
+          <ChatButton
             deliveryId={deliveryId}
             side="driver"
-            variant="full"           // just the icon with badge
+            variant="full"
             userName={userName}
             userPhoto={userPhoto}
             userPhone={userPhone}
           />
-          <TouchableOpacity style={styles.iconBtn} onPress={() => Linking.openURL(`tel:${params.recipientPhone}`)}>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() => Linking.openURL(`tel:${recipientPhone}`)}
+          >
             <Ionicons name="call-outline" size={20} color={Colors.primary} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.iconBtn}>
@@ -224,18 +286,28 @@ else router.replace('/user/(tabs)/home');}}>
 
         <View style={styles.divider} />
 
+        {/* Scan QR — replaces the old "Start Delivery" plain text button */}
         <TouchableOpacity
           style={styles.primaryBtn}
-          onPress={handleStartDelivery}
+          onPress={() => setScannerVisible(true)}
           activeOpacity={0.85}
-          disabled={loading}
+          disabled={verifying}
         >
-          {loading
-            ? <ActivityIndicator color={Colors.white} />
-            : <Text style={styles.primaryBtnText}>Start Delivery</Text>
-          }
+          <Ionicons name="qr-code-outline" size={18} color={Colors.white} style={{ marginRight: 8 }} />
+          <Text style={styles.primaryBtnText}>
+            {verifying ? 'Verifying...' : 'Scan Customer QR Code'}
+          </Text>
         </TouchableOpacity>
       </View>
+
+      {/* QR SCANNER MODAL */}
+      <QRScanner
+        visible={scannerVisible}
+        onClose={() => setScannerVisible(false)}
+        onScanned={handleQRScanned}
+        title="Scan Pickup QR"
+        hint="Scan the QR code on the customer's phone"
+      />
     </View>
   );
 }
@@ -282,14 +354,12 @@ const styles = StyleSheet.create({
     width: 40, height: 4, backgroundColor: Colors.border,
     borderRadius: 2, marginBottom: 20,
   },
-
   checkCircle: {
     width: 72, height: 72, borderRadius: 36,
     backgroundColor: Colors.primary,
     alignItems: 'center', justifyContent: 'center',
     marginBottom: 16,
   },
-
   title: {
     fontFamily: Fonts.poppins.semiBold, fontSize: 18, color: Colors.textPrimary,
     marginBottom: 6, textAlign: 'center',
@@ -298,27 +368,20 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.textSecondary,
     textAlign: 'center', marginBottom: 4,
   },
-
   divider: {
     width: '100%', height: 1,
     backgroundColor: Colors.border, marginVertical: 16,
   },
-
   actionRow: { flexDirection: 'row', gap: 10, width: '100%', alignItems: 'center' },
-  actionBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: Colors.border, borderRadius: 12, paddingVertical: 12, gap: 8,
-  },
-  actionBtnText: { fontFamily: Fonts.poppins.medium, fontSize: 14, color: Colors.primary },
   iconBtn: {
     width: 48, height: 48, borderRadius: 12,
     borderWidth: 1, borderColor: Colors.border,
     alignItems: 'center', justifyContent: 'center',
   },
-
   primaryBtn: {
     width: '100%', backgroundColor: Colors.primary,
-    borderRadius: 14, paddingVertical: 16, alignItems: 'center',
+    borderRadius: 14, paddingVertical: 16,
+    alignItems: 'center', flexDirection: 'row', justifyContent: 'center',
   },
   primaryBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.white },
 });

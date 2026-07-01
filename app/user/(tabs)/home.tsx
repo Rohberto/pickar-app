@@ -30,8 +30,9 @@ const CLOUDINARY_CLOUD = 'dtr1shkje';
 const CLOUDINARY_PRESET = 'pickar_profiles';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
-const SHEET_COLLAPSED = SCREEN_HEIGHT * 0.44;
 const SHEET_EXPANDED  = SCREEN_HEIGHT * 0.15;
+const SHEET_COLLAPSED = SCREEN_HEIGHT * 0.44;
+const SHEET_CLOSED    = SCREEN_HEIGHT - 90;
 
 const MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#f3f4f6' }] },
@@ -50,18 +51,37 @@ export default function HomeScreen() {
   const { user, setUser } = useAuth() as any;
   const mapRef = useRef<MapView>(null);
 
-  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [userLocation, setUserLocation]     = useState<{ latitude: number; longitude: number } | null>(null);
   const [activeDelivery, setActiveDelivery] = useState<{ _id: string; status: string } | null>(null);
   const [showPromoBanner, setShowPromoBanner] = useState(true);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
-  const [mapReady, setMapReady] = useState(false);
-  const [walletBalance, setWalletBalance] = useState<number | null>(null);
+  const [mapReady, setMapReady]             = useState(false);
+  const [walletBalance, setWalletBalance]   = useState<number | null>(null);
+  const [sheetClosed, setSheetClosed]       = useState(false);
+  const [cancellingDelivery, setCancellingDelivery] = useState(false);
 
   const firstName = (user?.fullName || user?.name || 'there').split(' ')[0];
 
-  // ─── Draggable sheet ─────────────────────────────────────────
+  // ─── Draggable sheet ──────────────────────────────────────────
   const sheetTop = useRef(new Animated.Value(SHEET_COLLAPSED)).current;
   const lastSheetTop = useRef(SHEET_COLLAPSED);
+
+  const sheetOpacity = sheetTop.interpolate({
+    inputRange: [SHEET_COLLAPSED, SHEET_CLOSED],
+    outputRange: [1, 0],
+    extrapolate: 'clamp',
+  });
+
+  const snapTo = (destination: number) => {
+    lastSheetTop.current = destination;
+    setSheetClosed(destination === SHEET_CLOSED);
+    Animated.spring(sheetTop, {
+      toValue: destination,
+      useNativeDriver: false,
+      tension: 60,
+      friction: 12,
+    }).start();
+  };
 
   const panResponder = useRef(
     PanResponder.create({
@@ -69,23 +89,22 @@ export default function HomeScreen() {
       onMoveShouldSetPanResponder: (_, { dy }) => Math.abs(dy) > 5,
       onPanResponderMove: (_, { dy }) => {
         const next = lastSheetTop.current + dy;
-        const clamped = Math.max(SHEET_EXPANDED, Math.min(SHEET_COLLAPSED, next));
+        const clamped = Math.max(SHEET_EXPANDED, Math.min(SHEET_CLOSED, next));
         sheetTop.setValue(clamped);
       },
       onPanResponderRelease: (_, { dy, vy }) => {
-        const destination = dy + vy * 80 < 0 ? SHEET_EXPANDED : SHEET_COLLAPSED;
-        lastSheetTop.current = destination;
-        Animated.spring(sheetTop, {
-          toValue: destination,
-          useNativeDriver: false,
-          tension: 60,
-          friction: 12,
-        }).start();
+        const current = lastSheetTop.current + dy;
+        const projected = current + vy * 80;
+        const stops = [SHEET_EXPANDED, SHEET_COLLAPSED, SHEET_CLOSED];
+        const destination = stops.reduce((closest, stop) =>
+          Math.abs(stop - projected) < Math.abs(closest - projected) ? stop : closest
+        );
+        snapTo(destination);
       },
     })
   ).current;
 
-  // ─── Animate map only when both ready ────────────────────────
+  // ─── Map centre on ready ──────────────────────────────────────
   useEffect(() => {
     if (mapReady && userLocation) {
       mapRef.current?.animateToRegion(
@@ -95,18 +114,13 @@ export default function HomeScreen() {
     }
   }, [mapReady, userLocation]);
 
-  // ─── Location ────────────────────────────────────────────────
+  // ─── Location ─────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
-      const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-      setUserLocation({
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-      });
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setUserLocation({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
     })();
   }, []);
 
@@ -132,7 +146,6 @@ export default function HomeScreen() {
     } catch (_) {}
   };
 
-  // Refresh wallet balance whenever screen comes into focus
   useFocusEffect(
     useCallback(() => {
       checkActiveDelivery();
@@ -143,11 +156,72 @@ export default function HomeScreen() {
   const checkActiveDelivery = async () => {
     try {
       const { data } = await api.get('/deliveries/active');
-      setActiveDelivery(data.success && data.data ? data.data : null);
+      if (data.success && data.data) {
+        setActiveDelivery(data.data);
+        if (data.data.status === 'driver_assigned') {
+          Alert.alert(
+            '🎉 Driver Found!',
+            'A driver accepted your delivery while you were away.',
+            [{
+              text: 'Track Driver',
+              onPress: () => router.push({
+                pathname: '/user/finding-driver',
+                params: { deliveryId: data.data._id },
+              } as never),
+            }]
+          );
+        }
+      } else {
+        setActiveDelivery(null);
+      }
     } catch (_) {}
   };
 
-  // ─── Cloudinary photo upload ──────────────────────────────────
+  // ─── Cancel stuck delivery ────────────────────────────────────
+  // Called on long press of the active delivery banner.
+  // Cancels ALL deliveries stuck in finding_driver / pending so the
+  // user can start a fresh one.
+  const handleLongPressDelivery = () => {
+    const isStuck =
+      activeDelivery?.status === 'finding_driver' ||
+      activeDelivery?.status === 'pending';
+
+    if (!isStuck) {
+      // Delivery is actively in progress — don't offer cancel from here
+      router.push({
+        pathname: '/user/finding-driver',
+        params: { deliveryId: activeDelivery!._id },
+      } as never);
+      return;
+    }
+
+    Alert.alert(
+      'Delivery Stuck?',
+      'This delivery is still searching for a driver. What would you like to do?',
+      [
+        { text: 'Keep Searching', style: 'cancel' },
+        {
+          text: 'Cancel & Start New',
+          style: 'destructive',
+          onPress: async () => {
+            setCancellingDelivery(true);
+            try {
+              // Cancel all stuck deliveries for this user
+              await api.post('/deliveries/cancel-stuck');
+              setActiveDelivery(null);
+              Alert.alert('Cancelled', 'You can now start a new delivery.');
+            } catch (err: any) {
+              Alert.alert('Error', err?.response?.data?.message || 'Could not cancel. Try again.');
+            } finally {
+              setCancellingDelivery(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // ─── Photo upload ─────────────────────────────────────────────
   const handlePickAndUploadPhoto = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -205,6 +279,10 @@ export default function HomeScreen() {
     : activeDelivery?.status === 'driver_assigned' ? 'Driver is heading to you'
     : 'Finding a driver...';
 
+  const isStuckDelivery =
+    activeDelivery?.status === 'finding_driver' ||
+    activeDelivery?.status === 'pending';
+
   const balanceLabel = walletBalance !== null
     ? `₦${walletBalance.toLocaleString()}`
     : '---';
@@ -244,7 +322,6 @@ export default function HomeScreen() {
 
       {/* ── FLOATING TOP BAR ─────────────────────────────────── */}
       <View style={styles.mapTopBar}>
-        {/* Left — wallet balance pill (where logo was) */}
         <TouchableOpacity
           style={styles.walletPill}
           onPress={() => router.push('/user/(tabs)/wallet' as never)}
@@ -254,15 +331,27 @@ export default function HomeScreen() {
           <Text style={styles.walletPillText}>{balanceLabel}</Text>
         </TouchableOpacity>
 
-        {/* Right — notification bell (stays where it was) */}
         <TouchableOpacity style={styles.notifBtn}>
           <Ionicons name="notifications-outline" size={20} color={Colors.textPrimary} />
           <View style={styles.notifDot} />
         </TouchableOpacity>
       </View>
 
+      {sheetClosed && (
+        <TouchableOpacity
+          style={styles.reopenPill}
+          activeOpacity={0.85}
+          onPress={() => snapTo(SHEET_COLLAPSED)}
+        >
+          <View style={styles.reopenHandle} />
+        </TouchableOpacity>
+      )}
+
       {/* ── DRAGGABLE GRADIENT SHEET ──────────────────────────── */}
-      <Animated.View style={[styles.sheet, { top: sheetTop }]}>
+      <Animated.View
+        style={[styles.sheet, { top: sheetTop, opacity: sheetOpacity }]}
+        pointerEvents={sheetClosed ? 'none' : 'auto'}
+      >
         <LinearGradient
           colors={['#9B1515', '#3D0707']}
           style={StyleSheet.absoluteFillObject}
@@ -307,24 +396,37 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          {/* ── ACTIVE DELIVERY ── */}
+          {/* ── ACTIVE DELIVERY BANNER ── */}
           {activeDelivery && (
             <TouchableOpacity
-              style={styles.activeBanner}
+              style={[styles.activeBanner, isStuckDelivery && styles.activeBannerStuck]}
               onPress={() =>
                 router.push({
                   pathname: '/user/finding-driver',
                   params: { deliveryId: activeDelivery._id },
                 } as never)
               }
+              onLongPress={handleLongPressDelivery}
+              delayLongPress={600}
               activeOpacity={0.85}
             >
-              <View style={styles.activePulseRing}>
-                <View style={styles.activePulseDot} />
-              </View>
+              {cancellingDelivery ? (
+                <ActivityIndicator color={Colors.primary} style={{ marginRight: 12 }} />
+              ) : (
+                <View style={styles.activePulseRing}>
+                  <View style={[
+                    styles.activePulseDot,
+                    isStuckDelivery && styles.activePulseDotStuck,
+                  ]} />
+                </View>
+              )}
               <View style={{ flex: 1, marginLeft: 12 }}>
                 <Text style={styles.activeBannerTitle}>Delivery in progress</Text>
                 <Text style={styles.activeBannerSub}>{activeStatusText}</Text>
+                {/* Hint shown only when stuck */}
+                {isStuckDelivery && !cancellingDelivery && (
+                  <Text style={styles.activeBannerHint}>Hold to cancel & start new</Text>
+                )}
               </View>
               <View style={styles.activeBannerArrow}>
                 <Ionicons name="arrow-forward" size={16} color="#9B1515" />
@@ -369,19 +471,19 @@ export default function HomeScreen() {
               <Text style={styles.serviceLabel}>Send a package</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.serviceCard} activeOpacity={0.85}>
+            <TouchableOpacity
+              style={styles.serviceCard}
+              onPress={() => router.push('/user/move-loads' as never)}
+              activeOpacity={0.85}
+            >
               <View style={styles.serviceImgContainer}>
-                <Image
-                  source={require('@/assets/images/bus.png')}
-                  style={styles.serviceImg}
-                  resizeMode="contain"
-                />
+                <Image source={require('@/assets/images/bus.png')} style={styles.serviceImg} resizeMode="contain" />
               </View>
               <Text style={styles.serviceLabel}>Move your house loads</Text>
             </TouchableOpacity>
           </View>
 
-          {/* ── RIDE HISTORY (replaces wallet card) ── */}
+          {/* ── RIDE HISTORY ── */}
           <TouchableOpacity
             style={styles.historyCard}
             activeOpacity={0.85}
@@ -424,9 +526,7 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1, shadowRadius: 4, elevation: 4,
   },
-  walletPillText: {
-    fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.primary,
-  },
+  walletPillText: { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.primary },
 
   notifBtn: {
     width: 40, height: 40, borderRadius: 20,
@@ -472,6 +572,14 @@ const styles = StyleSheet.create({
   },
   scrollContent: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 16 },
 
+  reopenPill: {
+    position: 'absolute', left: 0, right: 0, bottom: 28,
+    alignItems: 'center', zIndex: 9,
+  },
+  reopenHandle: {
+    width: 44, height: 5, borderRadius: 3, backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 18 },
   avatarContainer: { width: 52, height: 52, marginRight: 14, position: 'relative' },
   avatarPressable: {
@@ -487,24 +595,32 @@ const styles = StyleSheet.create({
   },
   greetingBlock: { flex: 1 },
   hiText: { fontFamily: Fonts.poppins.semiBold, fontSize: 18, color: '#fff' },
-  subText: {
-    fontFamily: Fonts.poppins.regular, fontSize: 12,
-    color: 'rgba(255,255,255,0.6)', marginTop: 1,
-  },
+  subText: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 1 },
 
+  // Active delivery banner
   activeBanner: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#fff', borderRadius: 16, padding: 14, marginBottom: 12,
     shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15, shadowRadius: 10, elevation: 6,
   },
+  activeBannerStuck: {
+    // Subtle amber tint when stuck in finding_driver so user notices it's different
+    borderWidth: 1.5,
+    borderColor: '#F59E0B',
+  },
   activePulseRing: {
     width: 32, height: 32, borderRadius: 16,
     backgroundColor: 'rgba(155,21,21,0.12)', alignItems: 'center', justifyContent: 'center',
   },
   activePulseDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: Colors.primary },
+  activePulseDotStuck: { backgroundColor: '#F59E0B' }, // amber when stuck
   activeBannerTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: Colors.textPrimary },
-  activeBannerSub: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginTop: 1 },
+  activeBannerSub:  { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginTop: 1 },
+  activeBannerHint: {
+    fontFamily: Fonts.poppins.regular, fontSize: 10,
+    color: '#F59E0B', marginTop: 3,
+  },
   activeBannerArrow: {
     width: 30, height: 30, borderRadius: 15,
     backgroundColor: 'rgba(155,21,21,0.1)', alignItems: 'center', justifyContent: 'center',
@@ -520,7 +636,7 @@ const styles = StyleSheet.create({
     width: 38, height: 38, borderRadius: 12,
     backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center',
   },
-  promoPrimary: { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: '#fff' },
+  promoPrimary:   { fontFamily: Fonts.poppins.semiBold, fontSize: 13, color: '#fff' },
   promoSecondary: {
     fontFamily: Fonts.poppins.regular, fontSize: 11,
     color: 'rgba(255,255,255,0.55)', marginTop: 1, textDecorationLine: 'underline',
@@ -560,9 +676,7 @@ const styles = StyleSheet.create({
     width: 44, height: 44, borderRadius: 22,
     backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center',
   },
-  historyTitle: {
-    fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: '#fff', marginLeft: 14,
-  },
+  historyTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: '#fff', marginLeft: 14 },
   historySub: {
     fontFamily: Fonts.poppins.regular, fontSize: 11,
     color: 'rgba(255,255,255,0.5)', marginTop: 2, marginLeft: 14,

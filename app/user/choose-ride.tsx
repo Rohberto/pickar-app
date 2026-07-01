@@ -94,18 +94,20 @@ export default function ChooseRideScreen() {
     }
   };
 
-  const getRideIcon = (type: string) => {
-    switch (type) {
-      case 'truck':
-        return require('@/assets/images/bus.png');
-      case 'standard':
-      case 'eco_send':
-      case 'express':
-        return require('@/assets/images/package.png');
-      default:
-        return require('@/assets/images/package.png');
-    }
-  };
+const getRideIcon = (type: string) => {
+  switch (type) {
+    case 'truck':
+      return require('@/assets/images/bus.png');
+    case 'standard':
+      return require('@/assets/images/standard.png');
+    case 'eco_send':
+      return require('@/assets/images/eco_send.png');
+    case 'express':
+      return require('@/assets/images/express.png');
+    default:
+      return require('@/assets/images/standard.png');
+  }
+};
 
   if (loading) {
     return (
@@ -328,11 +330,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flex: 1,
   },
-  rideIcon: {
-    width: 48,
-    height: 48,
-    marginRight: 16,
-  },
+rideIcon: {
+  width: 80,
+  height: 60,
+  marginRight: 16,
+},
   rideInfo: {
     flex: 1,
   },
