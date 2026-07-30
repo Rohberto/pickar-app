@@ -61,11 +61,14 @@ class AuthService {
     }
   }
 
-  // Register new driver with documents
+// Register new driver with documents
   async signupDriver(data: {
     fullName: string;
     email: string;
     phone: string;
+    nationality: string;
+    stateOfOrigin: string;
+    residentialAddress: string;
     password: string;
     idDocument: string;
     proofOfAddress: string;
@@ -76,6 +79,9 @@ class AuthService {
       formData.append('fullName', data.fullName);
       formData.append('email', data.email);
       formData.append('phone', data.phone);
+      formData.append('nationality', data.nationality);
+      formData.append('stateOfOrigin', data.stateOfOrigin);
+      formData.append('residentialAddress', data.residentialAddress);
       formData.append('password', data.password);
       formData.append('userType', 'driver');
 
@@ -115,7 +121,6 @@ class AuthService {
       throw this.handleError(error);
     }
   }
-
   // Login user or driver
   async login(data: LoginData): Promise<AuthResponse> {
     try {

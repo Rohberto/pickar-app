@@ -34,6 +34,9 @@ interface DriverProfile {
   rating?: { average: number; count: number };
   vehicle?: { type: 'bike' | 'truck'; plateNumber: string };
   status: string;
+  nationality?: string;
+  stateOfOrigin?: string;
+  residentialAddress?: string;
 }
 
 interface BankAccount {
@@ -112,6 +115,15 @@ export default function DriverAccountScreen() {
   const [nameFocused, setNameFocused] = useState(false);
   const [plateFocused, setPlateFocused] = useState(false);
 
+  // ── New: nationality / state of origin / residential address ──────
+  const [nationality, setNationality] = useState('');
+  const [stateOfOrigin, setStateOfOrigin] = useState('');
+  const [residentialAddress, setResidentialAddress] = useState('');
+  const [savingDetails, setSavingDetails] = useState(false);
+  const [nationalityFocused, setNationalityFocused] = useState(false);
+  const [stateOriginFocused, setStateOriginFocused] = useState(false);
+  const [addressFocused, setAddressFocused] = useState(false);
+
   useEffect(() => {
     fetchProfile();
   }, []);
@@ -126,6 +138,9 @@ export default function DriverAccountScreen() {
         setPhone(d.phone || '');
         setPlateNumber(d.vehicle?.plateNumber || '');
         setVehicleType(d.vehicle?.type || 'bike');
+        setNationality(d.nationality || '');
+        setStateOfOrigin(d.stateOfOrigin || '');
+        setResidentialAddress(d.residentialAddress || '');
       }
       const { data: bankData } = await api.get('/drivers/bank-accounts');
       if (bankData.success) setBankAccounts(bankData.data);
@@ -211,6 +226,33 @@ export default function DriverAccountScreen() {
     }
   };
 
+  // ─── Save nationality / state of origin / residential address ─
+  const handleSaveDetails = async () => {
+    setSavingDetails(true);
+    try {
+      await api.patch('/drivers/me', {
+        nationality: nationality.trim(),
+        stateOfOrigin: stateOfOrigin.trim(),
+        residentialAddress: residentialAddress.trim(),
+      });
+      setDriver(prev =>
+        prev
+          ? {
+              ...prev,
+              nationality: nationality.trim(),
+              stateOfOrigin: stateOfOrigin.trim(),
+              residentialAddress: residentialAddress.trim(),
+            }
+          : prev
+      );
+      Alert.alert('Success', 'Details updated.');
+    } catch (err: any) {
+      Alert.alert('Error', err?.response?.data?.message || 'Failed to update details.');
+    } finally {
+      setSavingDetails(false);
+    }
+  };
+
   const handleContactUs = () => {
     Alert.alert('Contact Us', 'How would you like to reach us?', [
       { text: 'Email', onPress: () => Linking.openURL('mailto:support@pickar.ng?subject=Driver Support') },
@@ -237,6 +279,10 @@ export default function DriverAccountScreen() {
   const vehicleChanged =
     plateNumber.trim().toUpperCase() !== (driver?.vehicle?.plateNumber || '') ||
     vehicleType !== (driver?.vehicle?.type || 'bike');
+  const detailsChanged =
+    nationality.trim() !== (driver?.nationality || '').trim() ||
+    stateOfOrigin.trim() !== (driver?.stateOfOrigin || '').trim() ||
+    residentialAddress.trim() !== (driver?.residentialAddress || '').trim();
 
   const avatarUri = driver?.photo
     ? driver.photo
@@ -389,6 +435,83 @@ export default function DriverAccountScreen() {
               <InfoRow label="Phone Number" value={driver?.phone || ''} verified />
               <View style={styles.infoRowDivider} />
               <InfoRow label="Email" value={user?.email || ''} verified />
+            </SectionCard>
+
+            {/* ── New: Nationality / State of Origin / Residential Address ── */}
+            <Text style={styles.sectionTitle}>Additional Details</Text>
+            <SectionCard>
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>Nationality</Text>
+                <View style={[styles.fieldInput, nationalityFocused && styles.fieldInputFocused]}>
+                  <TextInput
+                    style={styles.fieldTextInput}
+                    value={nationality}
+                    onChangeText={setNationality}
+                    onFocus={() => setNationalityFocused(true)}
+                    onBlur={() => setNationalityFocused(false)}
+                    placeholder="e.g. Nigerian"
+                    placeholderTextColor={Colors.textSecondary}
+                    autoCapitalize="words"
+                  />
+                </View>
+              </View>
+
+              <View style={styles.infoRowDivider} />
+
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>State of Origin</Text>
+                <View style={[styles.fieldInput, stateOriginFocused && styles.fieldInputFocused]}>
+                  <TextInput
+                    style={styles.fieldTextInput}
+                    value={stateOfOrigin}
+                    onChangeText={setStateOfOrigin}
+                    onFocus={() => setStateOriginFocused(true)}
+                    onBlur={() => setStateOriginFocused(false)}
+                    placeholder="e.g. Lagos State"
+                    placeholderTextColor={Colors.textSecondary}
+                    autoCapitalize="words"
+                  />
+                </View>
+              </View>
+
+              <View style={styles.infoRowDivider} />
+
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>Residential Address</Text>
+                <View
+                  style={[
+                    styles.fieldInput,
+                    addressFocused && styles.fieldInputFocused,
+                    { minHeight: 70, alignItems: 'flex-start', paddingVertical: 10 },
+                  ]}
+                >
+                  <TextInput
+                    style={[styles.fieldTextInput, { textAlignVertical: 'top' }]}
+                    value={residentialAddress}
+                    onChangeText={setResidentialAddress}
+                    onFocus={() => setAddressFocused(true)}
+                    onBlur={() => setAddressFocused(false)}
+                    placeholder="Your current residential address"
+                    placeholderTextColor={Colors.textSecondary}
+                    multiline
+                    numberOfLines={3}
+                  />
+                </View>
+              </View>
+
+              {detailsChanged && (
+                <TouchableOpacity
+                  style={[styles.saveVehicleBtn, { marginTop: 12, marginBottom: 0 }]}
+                  onPress={handleSaveDetails}
+                  disabled={savingDetails}
+                  activeOpacity={0.85}
+                >
+                  {savingDetails
+                    ? <ActivityIndicator color="#fff" />
+                    : <Text style={styles.saveVehicleBtnText}>Save Details</Text>
+                  }
+                </TouchableOpacity>
+              )}
             </SectionCard>
 
             <Text style={styles.sectionTitle}>Account Status</Text>
