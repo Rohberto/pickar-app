@@ -1,3 +1,5 @@
+import LiveLocationMarker from '@/components/map/LiveLocationMarker';
+import NearbyDriversLayer from '@/components/map/NearbyDriversLayer';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
@@ -5,7 +7,6 @@ import api from '@/services/api';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import * as Location from 'expo-location';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -24,7 +25,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { PROVIDER_GOOGLE } from 'react-native-maps';
 
 const CLOUDINARY_CLOUD = 'dtr1shkje';
 const CLOUDINARY_PRESET = 'pickar_profiles';
@@ -34,16 +35,31 @@ const SHEET_EXPANDED  = SCREEN_HEIGHT * 0.15;
 const SHEET_COLLAPSED = SCREEN_HEIGHT * 0.44;
 const SHEET_CLOSED    = SCREEN_HEIGHT - 90;
 
+// Tap vs. drag threshold on the sheet handle — under this, a release
+// counts as a tap (toggle expand/collapse) rather than a drag gesture.
+const TAP_THRESHOLD_PX = 6;
+
 const MAP_STYLE = [
-  { elementType: 'geometry', stylers: [{ color: '#f3f4f6' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#6b7280' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#ffffff' }] },
+  { elementType: 'geometry', stylers: [{ color: '#f5f5f5' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#616161' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#f5f5f5' }] },
+  { featureType: 'administrative.land_parcel', elementType: 'labels.text.fill', stylers: [{ color: '#bdbdbd' }] },
+  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#eeeeee' }] },
+  { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#757575' }] },
+  { featureType: 'poi.business', elementType: 'labels.icon', stylers: [{ visibility: 'on' }] },
+  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ color: '#e5e5e5' }] },
+  { featureType: 'poi.park', elementType: 'labels.text.fill', stylers: [{ color: '#9e9e9e' }] },
   { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#ffffff' }] },
-  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#e5e7eb' }] },
-  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#f9fafb' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#bfdbfe' }] },
-  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#e0e0e0' }] },
+  { featureType: 'road.arterial', elementType: 'labels.text.fill', stylers: [{ color: '#757575' }] },
+  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#dadada' }] },
+  { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#616161' }] },
+  { featureType: 'road.local', elementType: 'labels.text.fill', stylers: [{ color: '#9e9e9e' }] },
+  { featureType: 'transit.line', elementType: 'geometry', stylers: [{ color: '#e5e5e5' }] },
+  { featureType: 'transit.station', elementType: 'geometry', stylers: [{ color: '#eeeeee' }] },
+  { featureType: 'transit.station', elementType: 'labels.icon', stylers: [{ visibility: 'on' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#c9d9ec' }] },
+  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#9e9e9e' }] },
 ];
 
 export default function HomeScreen() {
@@ -93,6 +109,15 @@ export default function HomeScreen() {
         sheetTop.setValue(clamped);
       },
       onPanResponderRelease: (_, { dy, vy }) => {
+        // A near-zero movement on release is a tap on the handle, not a
+        // drag — toggle between collapsed/expanded so the handle itself
+        // is a legitimate, larger tap target too (not just a drag knob).
+        if (Math.abs(dy) < TAP_THRESHOLD_PX) {
+          const isExpanded = lastSheetTop.current === SHEET_EXPANDED;
+          snapTo(isExpanded ? SHEET_COLLAPSED : SHEET_EXPANDED);
+          return;
+        }
+
         const current = lastSheetTop.current + dy;
         const projected = current + vy * 80;
         const stops = [SHEET_EXPANDED, SHEET_COLLAPSED, SHEET_CLOSED];
@@ -104,25 +129,20 @@ export default function HomeScreen() {
     })
   ).current;
 
-  // ─── Map centre on ready ──────────────────────────────────────
+  // ─── Map centre on first GPS fix only ─────────────────────────
+  // Guarded with a ref so continuous live-location updates (needed for
+  // the animated dot) don't keep yanking the map back to the user —
+  // only the very first fix recenters it.
+  const hasCenteredRef = useRef(false);
   useEffect(() => {
-    if (mapReady && userLocation) {
+    if (mapReady && userLocation && !hasCenteredRef.current) {
+      hasCenteredRef.current = true;
       mapRef.current?.animateToRegion(
         { ...userLocation, latitudeDelta: 0.012, longitudeDelta: 0.012 },
         800
       );
     }
   }, [mapReady, userLocation]);
-
-  // ─── Location ─────────────────────────────────────────────────
-  useEffect(() => {
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      setUserLocation({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
-    })();
-  }, []);
 
   // ─── Fetch profile + wallet on mount ─────────────────────────
   useEffect(() => {
@@ -308,16 +328,8 @@ export default function HomeScreen() {
           latitudeDelta: 0.012, longitudeDelta: 0.012,
         }}
       >
-        {userLocation && (
-          <Marker coordinate={userLocation} anchor={{ x: 0.5, y: 1 }} tracksViewChanges={false}>
-            <View style={styles.pinContainer}>
-              <View style={styles.pinBody}>
-                <View style={styles.pinInnerDot} />
-              </View>
-              <View style={styles.pinShadowBlob} />
-            </View>
-          </Marker>
-        )}
+        <LiveLocationMarker onLocationChange={setUserLocation} />
+        <NearbyDriversLayer userLocation={userLocation} rideType="bike" />
       </MapView>
 
       {/* ── FLOATING TOP BAR ─────────────────────────────────── */}
@@ -337,13 +349,15 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* ── REOPEN FAB (replaces the old tiny drag-handle target) ── */}
       {sheetClosed && (
         <TouchableOpacity
-          style={styles.reopenPill}
+          style={styles.reopenFab}
           activeOpacity={0.85}
           onPress={() => snapTo(SHEET_COLLAPSED)}
+          hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
         >
-          <View style={styles.reopenHandle} />
+          <Ionicons name="chevron-up" size={24} color={Colors.primary} />
         </TouchableOpacity>
       )}
 
@@ -541,25 +555,6 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.primary, borderWidth: 1.5, borderColor: '#fff',
   },
 
-  pinContainer: { alignItems: 'center' },
-  pinBody: {
-    width: 30, height: 30, borderRadius: 15,
-    backgroundColor: Colors.primary, borderWidth: 3, borderColor: '#fff',
-    alignItems: 'center', justifyContent: 'center',
-    borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
-    shadowColor: Colors.primary, shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5, shadowRadius: 6, elevation: 8,
-    transform: [{ rotate: '45deg' }],
-  },
-  pinInnerDot: {
-    width: 9, height: 9, borderRadius: 4.5,
-    backgroundColor: '#fff', transform: [{ rotate: '-45deg' }],
-  },
-  pinShadowBlob: {
-    width: 14, height: 6, borderRadius: 7,
-    backgroundColor: 'rgba(134,19,19,0.25)', marginTop: 2,
-  },
-
   sheet: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
     borderTopLeftRadius: 26, borderTopRightRadius: 26, overflow: 'hidden',
@@ -572,12 +567,20 @@ const styles = StyleSheet.create({
   },
   scrollContent: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 16 },
 
-  reopenPill: {
-    position: 'absolute', left: 0, right: 0, bottom: 28,
-    alignItems: 'center', zIndex: 9,
-  },
-  reopenHandle: {
-    width: 44, height: 5, borderRadius: 3, backgroundColor: 'rgba(0,0,0,0.25)',
+  // Floating "reopen" button — replaces the old tiny handle-only target.
+  // 52x52 circle comfortably clears the 44x44 minimum touch-target
+  // guideline, sits above the safe area, and reads as an obvious
+  // "tap to expand" affordance (same idea as Google Maps' own FABs).
+  reopenFab: {
+    position: 'absolute',
+    alignSelf: 'center',
+    bottom: 28,
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2, shadowRadius: 8, elevation: 8,
+    zIndex: 9,
   },
 
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 18 },

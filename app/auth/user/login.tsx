@@ -26,7 +26,7 @@ import { registerForPushNotifications } from '../../../services/notificationServ
 
 export default function UserLoginScreen() {
   const router = useRouter();
-  const { setAuthenticated, setUserType, setUser } = useAuth();
+  const { setAuthenticated, setUserType, setUser, setRememberMe } = useAuth();
   const [loading, setLoading] = useState(false);
   const [fadeAnim] = useState(new Animated.Value(0));
   
@@ -36,7 +36,7 @@ export default function UserLoginScreen() {
   });
 
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [rememberMe, setRememberMe] = useState(false);
+  const [rememberMe, setLocalRememberMe] = useState(false);
 
   useEffect(() => {
     Animated.timing(fadeAnim, {
@@ -78,6 +78,9 @@ console.log('[Login response]', JSON.stringify(response));
       if (response.success && response.data) {
         // Update auth state
         await setUserType('user');
+        // Must be set before/alongside setAuthenticated so loadStoredAuth
+        // knows on the next cold start whether to keep this session.
+        await setRememberMe(rememberMe);
         await setAuthenticated(true);
           setUser({
             id: response.data.user.id,
@@ -153,7 +156,7 @@ console.log('[Login response]', JSON.stringify(response));
               <View style={styles.optionsRow}>
                 <Pressable
                   style={styles.rememberMe}
-                  onPress={() => setRememberMe(!rememberMe)}
+                  onPress={() => setLocalRememberMe(!rememberMe)}
                 >
                   <View
                     style={[

@@ -2,7 +2,7 @@ import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
-import { HomeLogoIcon } from './HomeLogoIcon';
+import { HomeLogoIcon } from '../HomeLogoIcon';
 
 export default function UserTabLayout() {
   return (

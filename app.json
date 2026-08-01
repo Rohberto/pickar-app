@@ -16,7 +16,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.pickar.app",
+      "bundleIdentifier": "com.pickarenterprises.app",
        "config": {
     "googleMapsApiKey": "AIzaSyATNL2Szmpm5ZG4JF0EuR-3rWkWukouuY8"
   },
@@ -36,7 +36,7 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "package": "com.pickar.app",
+      "package": "com.pickarenterprises.app",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "splash": {

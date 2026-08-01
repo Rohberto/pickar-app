@@ -18,6 +18,7 @@ interface AuthState {
   userType: UserType;
   hasSeenOnboarding: boolean;
   isLoading: boolean;
+  rememberMe: boolean;
 
   setUser: (user: User | null) => void;
   // Update just the photo without replacing the whole user object
@@ -25,6 +26,7 @@ interface AuthState {
   setUserType: (type: UserType) => Promise<void>;
   setAuthenticated: (value: boolean) => Promise<void>;
   setHasSeenOnboarding: (value: boolean) => Promise<void>;
+  setRememberMe: (value: boolean) => Promise<void>;
   logout: () => Promise<void>;
   loadStoredAuth: () => Promise<void>;
 }
@@ -35,6 +37,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   userType: null,
   hasSeenOnboarding: false,
   isLoading: true,
+  rememberMe: false,
 
   setUser: (user) => {
     set({ user });
@@ -68,25 +71,68 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     await AsyncStorage.setItem('hasSeenOnboarding', value.toString());
   },
 
+  // Controls whether loadStoredAuth() restores the session on the NEXT
+  // cold start. true = stay logged in after closing the app.
+  // false = session is only valid for the current app instance; a fresh
+  // launch will find rememberMe !== 'true' and log the user out.
+  setRememberMe: async (value) => {
+    set({ rememberMe: value });
+    await AsyncStorage.setItem('rememberMe', value.toString());
+  },
+
   logout: async () => {
-    set({ isAuthenticated: false, user: null, userType: null });
-    await AsyncStorage.multiRemove(['isAuthenticated', 'userType', 'authToken', 'user']);
+    set({ isAuthenticated: false, user: null, userType: null, rememberMe: false });
+    await AsyncStorage.multiRemove([
+      'isAuthenticated',
+      'userType',
+      'authToken',
+      'user',
+      'rememberMe',
+    ]);
   },
 
   loadStoredAuth: async () => {
     try {
-      const [isAuth, userType, hasSeenOnboarding, userData] = await AsyncStorage.multiGet([
-        'isAuthenticated',
-        'userType',
-        'hasSeenOnboarding',
-        'user',
-      ]);
+      const [isAuth, userType, hasSeenOnboarding, userData, rememberMeStored] =
+        await AsyncStorage.multiGet([
+          'isAuthenticated',
+          'userType',
+          'hasSeenOnboarding',
+          'user',
+          'rememberMe',
+        ]);
+
+      const wasAuthenticated = isAuth[1] === 'true';
+      const wasRemembered = rememberMeStored[1] === 'true';
+
+      // Logged in previously but didn't check "Remember me" — don't
+      // silently restore that session on a fresh launch.
+      if (wasAuthenticated && !wasRemembered) {
+        await AsyncStorage.multiRemove([
+          'isAuthenticated',
+          'userType',
+          'authToken',
+          'user',
+          'rememberMe',
+        ]);
+
+        set({
+          isAuthenticated: false,
+          user: null,
+          userType: null,
+          rememberMe: false,
+          hasSeenOnboarding: hasSeenOnboarding[1] === 'true',
+          isLoading: false,
+        });
+        return;
+      }
 
       set({
-        isAuthenticated: isAuth[1] === 'true',
+        isAuthenticated: wasAuthenticated,
         userType: (userType[1] as UserType) || null,
         hasSeenOnboarding: hasSeenOnboarding[1] === 'true',
         user: userData[1] ? JSON.parse(userData[1]) : null,
+        rememberMe: wasRemembered,
         isLoading: false,
       });
     } catch (error) {

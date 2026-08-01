@@ -31,6 +31,7 @@ export default function UserLayout() {
       <Stack.Screen name="chat" />
       <Stack.Screen name="ride-history" options={{ headerShown: false }} />
       <Stack.Screen name="move-loads" options={{ headerShown: false }} />
+      <Stack.Screen name="HomeLogoIcon" options={{ headerShown: false }} />
     </Stack>
   );
 }

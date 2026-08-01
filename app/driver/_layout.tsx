@@ -30,6 +30,7 @@ export default function DriverLayout() {
        <Stack.Screen name="withdraw" />
        <Stack.Screen name="add-bank-account" />
        <Stack.Screen name="chat" />
+       <Stack.Screen name="HomeLogoIcon" />
     </Stack>
   );
 }
