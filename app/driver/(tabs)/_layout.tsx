@@ -2,7 +2,7 @@ import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
-import { HomeLogoIcon } from '../HomeLogoIcon'; // adjust path to wherever you saved it
+import { HomeLogoIcon } from '../../../components/HomeLogoIcon';
 
 export default function DriverTabsLayout() {
   return (

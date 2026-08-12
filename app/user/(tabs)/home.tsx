@@ -495,6 +495,20 @@ export default function HomeScreen() {
               </View>
               <Text style={styles.serviceLabel}>Move your house loads</Text>
             </TouchableOpacity>
+
+            {/* Interstate Delivery — Coming Soon. Same card treatment as the
+                two live services so it reads as a real, on-brand feature
+                rather than a buried footnote — just non-pressable and
+                dimmed, with a badge instead of a tap action. */}
+            <View style={[styles.serviceCard, styles.serviceCardDisabled]}>
+              <View style={styles.comingSoonBadgeFloat}>
+                <Text style={styles.comingSoonBadgeFloatText}>Soon</Text>
+              </View>
+              <View style={styles.serviceImgContainer}>
+                <Ionicons name="car-outline" size={56} color="rgba(255,255,255,0.55)" />
+              </View>
+              <Text style={[styles.serviceLabel, styles.serviceLabelDisabled]}>Interstate delivery</Text>
+            </View>
           </View>
 
           {/* ── RIDE HISTORY ── */}
@@ -651,12 +665,17 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase', marginBottom: 14,
   },
 
-  servicesRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
+  servicesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 20 },
   serviceCard: {
-    flex: 1, backgroundColor: 'rgba(255,255,255,0.2)',
+    flexBasis: '47%', flexGrow: 1,
+    backgroundColor: 'rgba(255,255,255,0.2)',
     borderRadius: 20, overflow: 'hidden', paddingBottom: 16,
     shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.12, shadowRadius: 8, elevation: 4,
+  },
+  serviceCardDisabled: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    position: 'relative',
   },
   serviceImgContainer: {
     width: '100%', height: 130, alignItems: 'center', justifyContent: 'center',
@@ -667,6 +686,13 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.poppins.medium, fontSize: 13,
     color: '#fff', textAlign: 'center', paddingHorizontal: 10, marginTop: 6,
   },
+  serviceLabelDisabled: { color: 'rgba(255,255,255,0.55)' },
+  comingSoonBadgeFloat: {
+    position: 'absolute', top: 10, right: 10, zIndex: 1,
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 9, paddingVertical: 3, borderRadius: 10,
+  },
+  comingSoonBadgeFloatText: { fontFamily: Fonts.poppins.semiBold, fontSize: 9, color: '#fff' },
 
   historyCard: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',

@@ -20,6 +20,13 @@ import {
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { io, Socket } from 'socket.io-client';
 
+// add to imports:
+import { useVerifyActiveTrip } from '@/hooks/useVerifyActiveTrip';
+
+// inside NavigateDeliveryScreen, right after the params block
+// (after `const pickupLng = ...`), add:
+
+
 const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || 'http://localhost:3000';
 const GOOGLE_MAPS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
 
@@ -140,6 +147,8 @@ export default function NavigateDeliveryScreen() {
   const instructionAnim    = useRef(new Animated.Value(0)).current;
 
   // ─── Mount ────────────────────────────────────────────────────
+useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as never));
+
   useEffect(() => {
     isMountedRef.current = true;
     fetchDriverProfile();

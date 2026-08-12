@@ -1,6 +1,7 @@
 import ChatButton from '@/components/ChatButton';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
+import { useVerifyActiveTrip } from '@/hooks/useVerifyActiveTrip';
 import api from '@/services/api';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -131,7 +132,7 @@ export default function NavigatePickupScreen() {
   const currentStepRef      = useRef(0);
   const isMountedRef        = useRef(false);
   const instructionAnim     = useRef(new Animated.Value(0)).current;
-
+useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as never));
   // ─── Mount ────────────────────────────────────────────────────
   useEffect(() => {
     isMountedRef.current = true;

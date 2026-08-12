@@ -37,6 +37,19 @@ interface Prediction {
   };
 }
 
+interface WeightTier {
+  id: string;
+  label: string;
+  weightKg: number;
+}
+
+const WEIGHT_TIERS: WeightTier[] = [
+  { id: 'under_3kg', label: 'Under 3kg', weightKg: 1 },
+  { id: '3_10kg', label: '3kg – 10kg', weightKg: 6 },
+  { id: '10_25kg', label: '10kg – 25kg', weightKg: 17 },
+  { id: 'over_25kg', label: 'Over 25kg (Truck only)', weightKg: 30 },
+];
+
 // ─── Google Places API Helpers ─────────────────────────────────────
 const searchPlaces = async (query: string): Promise<Prediction[]> => {
   if (!query || query.length < 3) return [];
@@ -49,6 +62,9 @@ const searchPlaces = async (query: string): Promise<Prediction[]> => {
       `&language=en`;
     const res = await fetch(url);
     const data = await res.json();
+    if (data.status !== 'OK') {
+  console.error('[Places] status:', data.status, data.error_message);
+}
     return data.status === 'OK' ? data.predictions ?? [] : [];
   } catch (err) {
     console.error('[Places] autocomplete error:', err);
@@ -62,7 +78,7 @@ const getPlaceCoords = async (placeId: string): Promise<{ lat: number; lng: numb
       `https://maps.googleapis.com/maps/api/place/details/json` +
       `?place_id=${placeId}` +
       `&fields=geometry,formatted_address` +
-      `&key=${GOOGLE_MAPS_KEY}`;
+      `&key=AIzaSyCKM6_Sg7hd1Omb8FbmNl_PUyByh84-8wQ`;
     const res = await fetch(url);
     const data = await res.json();
     if (data.status === 'OK') {
@@ -84,11 +100,13 @@ export default function SendPackageScreen() {
   const [recipientName, setRecipientName] = useState('');
   const [recipientPhone, setRecipientPhone] = useState('');
   const [packageType, setPackageType] = useState<'fragile' | 'non_fragile' | null>(null);
+  const [weightTier, setWeightTier] = useState<WeightTier | null>(null);
   const [agreedToInsurance, setAgreedToInsurance] = useState(true);
 
   const [showPickupSearch, setShowPickupSearch] = useState(false);
   const [showDestinationSearch, setShowDestinationSearch] = useState(false);
   const [showPackageTypeModal, setShowPackageTypeModal] = useState(false);
+  const [showWeightModal, setShowWeightModal] = useState(false);
 
   const [pickupQuery, setPickupQuery] = useState('');
   const [destinationQuery, setDestinationQuery] = useState('');
@@ -197,6 +215,7 @@ export default function SendPackageScreen() {
     if (!recipientName.trim()) return Alert.alert('Error', 'Please enter recipient name.');
     if (!recipientPhone.trim()) return Alert.alert('Error', 'Please enter recipient phone.');
     if (!packageType) return Alert.alert('Error', 'Please select package type.');
+    if (!weightTier) return Alert.alert('Error', 'Please select an estimated weight.');
 
     setFormLoading(true);
     try {
@@ -209,6 +228,7 @@ export default function SendPackageScreen() {
         recipientName: recipientName.trim(),
         recipientPhone: recipientPhone.trim(),
         packageType,
+        weightKg: weightTier.weightKg,
         agreedToInsurance,
       });
 
@@ -230,7 +250,8 @@ export default function SendPackageScreen() {
     !!recipientAddress &&
     !!recipientName.trim() &&
     !!recipientPhone.trim() &&
-    !!packageType;
+    !!packageType &&
+    !!weightTier;
 
   // Map Preview Component
   const LocationMapPreview = ({ address, title }: { address: LocationData | null; title: string }) => {
@@ -441,6 +462,22 @@ export default function SendPackageScreen() {
           </Pressable>
         </View>
 
+        {/* Weight */}
+        <View style={styles.inputSection}>
+          <Text style={styles.inputLabel}>Estimated Weight</Text>
+          <Pressable style={styles.locationBtn} onPress={() => setShowWeightModal(true)}>
+            <Ionicons
+              name="scale-outline"
+              size={20}
+              color={weightTier ? Colors.primary : Colors.textSecondary}
+            />
+            <Text style={[styles.locationBtnText, !weightTier && styles.placeholder]}>
+              {weightTier?.label ?? 'Select estimated weight'}
+            </Text>
+            <Ionicons name="chevron-forward" size={18} color={Colors.textSecondary} />
+          </Pressable>
+        </View>
+
         {/* Insurance */}
         <Pressable style={styles.insuranceRow} onPress={() => setAgreedToInsurance(!agreedToInsurance)}>
           <View style={[styles.checkbox, agreedToInsurance && styles.checkboxChecked]}>
@@ -501,6 +538,37 @@ export default function SendPackageScreen() {
                   <Text style={styles.pkgOptionText}>{opt.label}</Text>
                 </View>
                 {packageType === opt.id && <Ionicons name="checkmark-circle" size={22} color={Colors.primary} />}
+              </Pressable>
+            ))}
+          </View>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={showWeightModal} animationType="slide" transparent onRequestClose={() => setShowWeightModal(false)}>
+        <Pressable style={styles.pkgOverlay} onPress={() => setShowWeightModal(false)}>
+          <View style={styles.pkgSheet}>
+            <View style={styles.pkgHeader}>
+              <Pressable onPress={() => setShowWeightModal(false)}>
+                <Ionicons name="chevron-back" size={24} color={Colors.textPrimary} />
+              </Pressable>
+              <Text style={styles.pkgTitle}>Estimated Weight</Text>
+              <View style={{ width: 24 }} />
+            </View>
+
+            {WEIGHT_TIERS.map((tier) => (
+              <Pressable
+                key={tier.id}
+                style={styles.pkgOption}
+                onPress={() => {
+                  setWeightTier(tier);
+                  setShowWeightModal(false);
+                }}
+              >
+                <View style={styles.pkgOptionLeft}>
+                  <Ionicons name="scale-outline" size={22} color={Colors.textPrimary} />
+                  <Text style={styles.pkgOptionText}>{tier.label}</Text>
+                </View>
+                {weightTier?.id === tier.id && <Ionicons name="checkmark-circle" size={22} color={Colors.primary} />}
               </Pressable>
             ))}
           </View>
@@ -667,7 +735,7 @@ const styles = StyleSheet.create({
   emptyBox: { padding: 48, alignItems: 'center', gap: 8 },
   emptyText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.textSecondary },
 
-  // Package Type Modal
+  // Package Type / Weight Modal
   pkgOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   pkgSheet: { backgroundColor: Colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 40 },
   pkgHeader: {

@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   Dimensions,
@@ -56,7 +57,7 @@ const MAP_STYLE = [
   { featureType: 'administrative', elementType: 'geometry', stylers: [{ visibility: 'off' }] },
 ];
 
-type DeliveryStatus = 'finding_driver' | 'driver_assigned' | 'driver_arrived' | 'in_transit';
+type DeliveryStatus = 'ride_selected' | 'finding_driver' | 'no_driver_found' | 'driver_assigned' | 'driver_arrived' | 'in_transit';
 
 interface DriverInfo {
   _id: string;
@@ -126,6 +127,16 @@ export default function FindingDriverScreen() {
   const [driverDistance, setDriverDistance] = useState('');
   const [showTripDetails, setShowTripDetails] = useState(false);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
+  const [retrying, setRetrying] = useState(false);
+
+  // True until the very first status check resolves after mount. Nothing
+  // driver/searching-specific renders while this is true — avoids a flash
+  // of "Connecting you to a Driver" if the delivery is actually already
+  // further along by the time this screen finishes loading.
+  const [initialLoading, setInitialLoading] = useState(true);
+
+  const [noDriversYet, setNoDriversYet] = useState(false);
+
   const { incrementUnread, clearUnread, unreadCounts } = useChatStore();
   const unreadCount = unreadCounts[deliveryId] ?? 0;
 
@@ -146,7 +157,6 @@ export default function FindingDriverScreen() {
   const driverLocationRef  = useRef<{ lat: number; lng: number } | null>(null);
   const hasInitialFitRef   = useRef(false);
 
-  // ── FIX 1: Polling interval ref ────────────────────────────────
   const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { userRef.current = user; }, [user]);
@@ -171,10 +181,21 @@ export default function FindingDriverScreen() {
     return () => loop.stop();
   }, []);
 
+  // Kicks off the actual search — call once on mount, before anything
+  // else. This is what flips ride_selected → finding_driver on the
+  // backend and triggers matchDriver, so no driver can be offered this
+  // trip until this screen genuinely exists and has started listening.
+  const startSearch = async () => {
+    try {
+      await api.post(`/deliveries/${deliveryId}/start-search`);
+    } catch (err) {
+      console.error('[FindingDriver] startSearch error:', err);
+    }
+  };
+
   useEffect(() => {
     if (!deliveryId) return;
 
-    // Reset all state for new delivery
     setStatus('finding_driver');
     setDriver(null);
     setPickupCode('');
@@ -183,18 +204,25 @@ export default function FindingDriverScreen() {
     setDriverDistance('');
     setEta('');
     setRouteCoords([]);
+    setNoDriversYet(false);
+    setInitialLoading(true);
     driverReceivedRef.current = false;
     statusRef.current = 'finding_driver';
     driverLocationRef.current = null;
     hasInitialFitRef.current = false;
 
-    fetchDelivery();
     connectSocket();
-    startPolling(); // ── FIX 2: Start polling immediately
+
+    // Start search first, THEN fetch/poll — ensures matchDriver has
+    // already been triggered before we start checking on its progress.
+    startSearch().finally(() => {
+      fetchDelivery().finally(() => setInitialLoading(false));
+      startPolling();
+    });
 
     return () => {
       socketRef.current?.disconnect();
-      stopPolling(); // ── FIX 2: Clean up polling on unmount
+      stopPolling();
       if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
     };
   }, [deliveryId]);
@@ -215,11 +243,6 @@ export default function FindingDriverScreen() {
     }, [deliveryId])
   );
 
-  // ── FIX 2: Polling helpers ──────────────────────────────────────
-  // Polls every 3 seconds while status is finding_driver.
-  // Catches driver_assigned even when the socket event is missed
-  // (e.g. socket connected after the event was emitted, or old delivery
-  // room was still active when a new delivery was started).
   const startPolling = () => {
     if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
     pollingIntervalRef.current = setInterval(async () => {
@@ -244,7 +267,6 @@ export default function FindingDriverScreen() {
     }
   };
 
-  // ── Core fetch ──────────────────────────────────────────────────
   const fetchDelivery = async () => {
     try {
       const { data } = await api.get(`/deliveries/${deliveryId}/status`);
@@ -262,6 +284,21 @@ export default function FindingDriverScreen() {
           return;
         }
 
+        if (d.status === 'no_driver_found') {
+          statusRef.current = 'no_driver_found';
+          setStatus('no_driver_found');
+          return;
+        }
+
+        // ride_selected means start-search hasn't flipped it over to
+        // finding_driver yet (rare — usually resolves within one poll
+        // tick). Treat it the same as finding_driver in the UI.
+        if (d.status === 'ride_selected') {
+          statusRef.current = 'finding_driver';
+          setStatus('finding_driver');
+          return;
+        }
+
         const coords = d.pickupAddress?.coordinates;
         if (coords && mapRef.current) {
           mapRef.current.animateToRegion({
@@ -273,6 +310,7 @@ export default function FindingDriverScreen() {
         if (d.status !== 'finding_driver') {
           statusRef.current = d.status as DeliveryStatus;
           setStatus(d.status as DeliveryStatus);
+          setNoDriversYet(false);
           if (d.driver) {
             setDriver(d.driver);
             const driverLoc = (d.driver as any)?.location?.coordinates;
@@ -327,7 +365,6 @@ export default function FindingDriverScreen() {
   };
 
   const connectSocket = () => {
-    // Disconnect any existing socket before creating a new one
     socketRef.current?.disconnect();
 
     const socket = io(SOCKET_URL, {
@@ -339,19 +376,15 @@ export default function FindingDriverScreen() {
     });
     socketRef.current = socket;
 
-    // ── FIX 3: Always fetch on connect, not just on reconnect ──────
-    // Previously used isFirstConnect flag which meant a missed event
-    // on first connect would never be recovered. Now we always fetch
-    // so any driver assignment that happened before socket connected
-    // is caught immediately.
     socket.on('connect', () => {
       const userId = userRef.current?.id;
       if (userId) socket.emit('join_user_room', { userId });
-      fetchDelivery(); // always fetch — catches missed events
+      fetchDelivery();
     });
 
     socket.on('driver_assigned', (payload) => {
-      stopPolling(); // ── FIX 2: Stop polling — socket caught it
+      stopPolling();
+      setNoDriversYet(false);
       driverReceivedRef.current = true;
       setDriver(payload.driver);
       setPickupCode(payload.pickupCode ?? '');
@@ -468,32 +501,41 @@ export default function FindingDriverScreen() {
     });
 
     socket.on('no_drivers_available', () => {
-      Alert.alert(
-        'No Drivers Found',
-        'We could not find a driver nearby right now. Would you like to keep searching?',
-        [
-          {
-            text: 'Keep Searching',
-            onPress: () => {
-              api.post(`/deliveries/${deliveryId}/find-driver`).catch(() => {});
-            },
-          },
-          {
-            text: 'Cancel Delivery',
-            style: 'destructive',
-            onPress: async () => {
-              await api.post(`/deliveries/${deliveryId}/cancel`).catch(() => {});
-              router.replace('/user/(tabs)/home' as never);
-            },
-          },
-        ],
-        { cancelable: false }
-      );
+      setNoDriversYet(true);
+    });
+
+    socket.on('connecting_to_driver', () => {
+      setNoDriversYet(false);
+    });
+
+    socket.on('search_timeout', () => {
+      stopPolling();
+      statusRef.current = 'no_driver_found';
+      setStatus('no_driver_found');
     });
 
     socket.on('disconnect', (reason) => {
       console.log('[FindingDriver] Socket disconnected:', reason);
     });
+  };
+
+  const handleRetrySearch = async () => {
+    setRetrying(true);
+    try {
+      const { data } = await api.post(`/deliveries/${deliveryId}/find-driver`);
+      if (data.success) {
+        setNoDriversYet(false);
+        statusRef.current = 'finding_driver';
+        setStatus('finding_driver');
+        startPolling();
+      } else {
+        Alert.alert('Error', data.message ?? 'Could not retry search right now.');
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err.response?.data?.message ?? 'Could not retry search right now.');
+    } finally {
+      setRetrying(false);
+    }
   };
 
   const showBanner = () => {
@@ -593,7 +635,8 @@ export default function FindingDriverScreen() {
 
   // ── Derived values ───────────────────────────────────────────────
   const isSearching    = status === 'finding_driver';
-  const hasDriver      = !isSearching;
+  const searchFailed   = status === 'no_driver_found';
+  const hasDriver       = !isSearching && !searchFailed;
   const pickupCoords   = delivery?.pickupAddress?.coordinates;
   const recipientCoords = delivery?.recipient?.address?.coordinates;
   const targetCoords   = status === 'in_transit' ? recipientCoords : pickupCoords;
@@ -636,6 +679,14 @@ export default function FindingDriverScreen() {
     status === 'driver_arrived' ? 'Driver is here'
     : eta ? `Arriving in ${eta}`
     : 'Calculating...';
+
+  if (initialLoading) {
+    return (
+      <View style={[styles.container, { alignItems: 'center', justifyContent: 'center' }]}>
+        <ActivityIndicator size="large" color={Colors.primary} />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -730,7 +781,7 @@ export default function FindingDriverScreen() {
           )}
         </MapView>
 
-        {isSearching && (
+        {(isSearching || searchFailed) && (
           <TouchableOpacity
             style={styles.backButton}
             onPress={() => router.replace('/user/(tabs)/home' as never)}
@@ -748,7 +799,7 @@ export default function FindingDriverScreen() {
           </TouchableOpacity>
         )}
 
-        {isSearching && (
+        {isSearching && !noDriversYet && (
           <View style={styles.searchingOverlay} pointerEvents="none">
             <View style={styles.searchRow}>
               <Animated.View style={[styles.searchCircle, { transform: [{ scale: pulseAnim }] }]}>
@@ -792,10 +843,44 @@ export default function FindingDriverScreen() {
       )}
 
       {/* BOTTOM CARD */}
-      <View style={[styles.bottomCard, isSearching && styles.bottomCardShort]}>
+      <View style={[styles.bottomCard, (isSearching || searchFailed) && styles.bottomCardShort]}>
         <View style={styles.dragHandle} />
 
-        {isSearching ? (
+        {searchFailed ? (
+          <View style={{ alignItems: 'center', paddingVertical: 8 }}>
+            <Ionicons name="alert-circle-outline" size={32} color={Colors.textSecondary} style={{ marginBottom: 8 }} />
+            <Text style={styles.chooseLabel}>
+              We couldn't find a driver for this delivery. You can try again or cancel.
+            </Text>
+            <TouchableOpacity
+              style={[styles.btn, { width: '100%', marginTop: 8 }]}
+              onPress={handleRetrySearch}
+              disabled={retrying}
+            >
+              {retrying ? <ActivityIndicator color={Colors.white} /> : <Text style={styles.btnText}>Try Again</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.btn, styles.btnCancel, { width: '100%' }]} onPress={handleCancelTrip} activeOpacity={0.85}>
+              <Text style={styles.btnText}>Cancel Trip</Text>
+            </TouchableOpacity>
+          </View>
+        ) : isSearching && noDriversYet ? (
+          <View style={{ alignItems: 'center', paddingVertical: 8 }}>
+            <Ionicons name="time-outline" size={28} color={Colors.textSecondary} style={{ marginBottom: 8 }} />
+            <Text style={styles.chooseLabel}>
+              No drivers available nearby right now. We'll keep listening — or you can search again.
+            </Text>
+            <TouchableOpacity
+              style={[styles.btn, { width: '100%', marginTop: 8 }]}
+              onPress={handleRetrySearch}
+              disabled={retrying}
+            >
+              {retrying ? <ActivityIndicator color={Colors.white} /> : <Text style={styles.btnText}>Keep Searching</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.btn, styles.btnCancel, { width: '100%' }]} onPress={handleCancelTrip} activeOpacity={0.85}>
+              <Text style={styles.btnText}>Cancel Trip</Text>
+            </TouchableOpacity>
+          </View>
+        ) : isSearching ? (
           <>
             <Text style={styles.chooseLabel}>Choose pick-up location</Text>
             <View style={styles.addressRow}>
@@ -1032,7 +1117,7 @@ const styles = StyleSheet.create({
     maxHeight: height * 0.54,
     shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.07, shadowRadius: 12, elevation: 14,
   },
-  bottomCardShort: { maxHeight: height * 0.27 },
+  bottomCardShort: { maxHeight: height * 0.34 },
   dragHandle: { width: 40, height: 4, backgroundColor: '#D1D5DB', borderRadius: 2, alignSelf: 'center', marginBottom: 16 },
 
   chooseLabel: { fontFamily: Fonts.poppins.regular, fontSize: 13, color: Colors.textSecondary, textAlign: 'center', marginBottom: 12 },

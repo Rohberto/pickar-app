@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -18,23 +19,47 @@ import {
 } from 'react-native';
 
 interface RideOption {
-  type: string;
+  rideType: string;
   label: string;
-  basePrice: number;
-  discountedPrice: number;
+  description: string;
+  total: number;
+  distanceKm: number;
+  pickupZone: string;
+  dropoffZone: string;
   eta: number | null;
+  breakdown: Record<string, number>;
+}
+
+// Surge-fee keys we want to surface. Anything else in `breakdown`
+// (baseFee, distanceFee, weightFee, zoneFee) stays internal.
+const SURGE_LABELS = ['Peak Hour Fee', 'Island Congestion Fee', 'Rain Fee'];
+
+// Surge is a route-level condition — if it's active, it's active for every
+// ride type on this route. Compute the union once instead of per-row.
+function getActiveSurgeLabels(options: RideOption[]): string[] {
+  const active = new Set<string>();
+  options.forEach((opt) => {
+    SURGE_LABELS.forEach((label) => {
+      if (opt.breakdown?.[label] > 0) active.add(label);
+    });
+  });
+  return Array.from(active);
 }
 
 export default function ChooseRideScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
   const deliveryId = params.deliveryId as string;
-  
+
   const [rideOptions, setRideOptions] = useState<RideOption[]>([]);
   const [selectedRide, setSelectedRide] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [destination, setDestination] = useState('');
+
+  const [showWalletModal, setShowWalletModal] = useState(false);
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
+  const [walletLoading, setWalletLoading] = useState(false);
 
   useEffect(() => {
     fetchRideOptions();
@@ -54,7 +79,9 @@ export default function ChooseRideScreen() {
 
   const fetchRideOptions = async () => {
     try {
-      const response = await api.get('/deliveries/ride-options');
+      const response = await api.get('/deliveries/ride-options', {
+        params: { deliveryId },
+      });
       console.log('Ride options from backend:', response.data); // Debug log
       if (response.data.success) {
         setRideOptions(response.data.data);
@@ -64,6 +91,22 @@ export default function ChooseRideScreen() {
       Alert.alert('Error', 'Failed to load ride options');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleOpenWallet = async () => {
+    setShowWalletModal(true);
+    setWalletLoading(true);
+    try {
+      const response = await api.get('/wallet');
+      if (response.data.success) {
+        setWalletBalance(response.data.data.balance ?? 0);
+      }
+    } catch (error: any) {
+      console.error('Error fetching wallet balance:', error.response?.data || error.message);
+      setWalletBalance(null);
+    } finally {
+      setWalletLoading(false);
     }
   };
 
@@ -119,6 +162,8 @@ const getRideIcon = (type: string) => {
     );
   }
 
+  const activeSurgeLabels = getActiveSurgeLabels(rideOptions);
+
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
@@ -152,6 +197,18 @@ const getRideIcon = (type: string) => {
           <Text style={styles.title}>Choose a ride</Text>
         </View>
 
+        {/* Route-level surge banner — shows once, not per ride option */}
+        {activeSurgeLabels.length > 0 && (
+          <View style={styles.surgeBanner}>
+            <Ionicons name="alert-circle-outline" size={16} color={Colors.primary} />
+            <Text style={styles.surgeBannerText}>
+              {activeSurgeLabels.length === 1
+                ? `${activeSurgeLabels[0]} applies to this route`
+                : `${activeSurgeLabels.join(' + ')} apply to this route`}
+            </Text>
+          </View>
+        )}
+
         <ScrollView 
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
@@ -160,15 +217,15 @@ const getRideIcon = (type: string) => {
           <View style={styles.optionsContainer}>
             {rideOptions.map((option) => (
               <Pressable
-                key={option.type}
+                key={option.rideType}
                 style={[
                   styles.rideOption,
-                  selectedRide === option.type && styles.rideOptionSelected,
+                  selectedRide === option.rideType && styles.rideOptionSelected,
                 ]}
-                onPress={() => setSelectedRide(option.type)}
+                onPress={() => setSelectedRide(option.rideType)}
               >
                 <View style={styles.rideOptionLeft}>
-                  <Image source={getRideIcon(option.type)} style={styles.rideIcon} resizeMode="contain" />
+                  <Image source={getRideIcon(option.rideType)} style={styles.rideIcon} resizeMode="contain" />
                   <View style={styles.rideInfo}>
                     <Text style={styles.rideName}>{option.label}</Text>
                     <Text style={styles.rideEta}>
@@ -177,10 +234,7 @@ const getRideIcon = (type: string) => {
                   </View>
                 </View>
                 <View style={styles.rideOptionRight}>
-                  <Text style={styles.ridePrice}>₦{option.discountedPrice.toLocaleString()}</Text>
-                  {option.basePrice !== option.discountedPrice && (
-                    <Text style={styles.rideOldPrice}>₦{option.basePrice.toLocaleString()}</Text>
-                  )}
+                  <Text style={styles.ridePrice}>₦{option.total.toLocaleString()}</Text>
                 </View>
               </Pressable>
             ))}
@@ -192,8 +246,9 @@ const getRideIcon = (type: string) => {
             </View>
           )}
 
-          {/* Wallet */}
-          <Pressable style={styles.walletButton} onPress={() => router.push('/user/wallet' as never)}>
+          {/* Wallet — opens a modal instead of navigating away, so selecting
+              a ride type isn't lost just to check the balance */}
+          <Pressable style={styles.walletButton} onPress={handleOpenWallet}>
             <View style={styles.walletLeft}>
               <Ionicons name="wallet-outline" size={20} color={Colors.textPrimary} />
               <Text style={styles.walletText}>Wallet</Text>
@@ -223,6 +278,48 @@ const getRideIcon = (type: string) => {
           </Pressable>
         </View>
       </View>
+
+      {/* Wallet Balance Modal */}
+      <Modal
+        visible={showWalletModal}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowWalletModal(false)}
+      >
+        <Pressable style={styles.walletOverlay} onPress={() => setShowWalletModal(false)}>
+          <Pressable style={styles.walletSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.walletSheetHeader}>
+              <Text style={styles.walletSheetTitle}>Wallet</Text>
+              <Pressable onPress={() => setShowWalletModal(false)}>
+                <Ionicons name="close" size={22} color={Colors.textPrimary} />
+              </Pressable>
+            </View>
+
+            {walletLoading ? (
+              <View style={styles.walletBalanceBox}>
+                <ActivityIndicator color={Colors.primary} />
+              </View>
+            ) : (
+              <View style={styles.walletBalanceBox}>
+                <Text style={styles.walletBalanceLabel}>Available Balance</Text>
+                <Text style={styles.walletBalanceValue}>
+                  {walletBalance !== null ? `₦${walletBalance.toLocaleString()}` : 'Unable to load balance'}
+                </Text>
+              </View>
+            )}
+
+            <Pressable
+              style={styles.walletTopUpBtn}
+              onPress={() => {
+                setShowWalletModal(false);
+                router.push('/user/wallet' as never);
+              }}
+            >
+              <Text style={styles.walletTopUpText}>Top Up Wallet</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -303,6 +400,26 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.poppins.semiBold,
     color: Colors.textPrimary,
   },
+
+  // Surge banner — shows once for the whole route, not per ride option
+  surgeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 20,
+    marginBottom: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: `${Colors.primary}10`,
+  },
+  surgeBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: Fonts.poppins.medium,
+    color: Colors.primary,
+  },
+
   scrollContent: {
     paddingBottom: 20,
   },
@@ -423,5 +540,59 @@ walletButton: {
     backgroundColor: Colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+
+  // Wallet Modal
+  walletOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  walletSheet: {
+    backgroundColor: Colors.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: 40,
+  },
+  walletSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  walletSheetTitle: {
+    fontSize: 18,
+    fontFamily: Fonts.poppins.semiBold,
+    color: Colors.textPrimary,
+  },
+  walletBalanceBox: {
+    alignItems: 'center',
+    paddingVertical: 24,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 16,
+    marginBottom: 20,
+  },
+  walletBalanceLabel: {
+    fontSize: 13,
+    fontFamily: Fonts.poppins.regular,
+    color: Colors.textSecondary,
+    marginBottom: 8,
+  },
+  walletBalanceValue: {
+    fontSize: 28,
+    fontFamily: Fonts.poppins.bold,
+    color: Colors.textPrimary,
+  },
+  walletTopUpBtn: {
+    backgroundColor: Colors.primary,
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+  },
+  walletTopUpText: {
+    fontSize: 16,
+    fontFamily: Fonts.poppins.semiBold,
+    color: Colors.white,
   },
 });
