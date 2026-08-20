@@ -1,11 +1,13 @@
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
+import { DRIVER_RIDE_TYPES, RideTypeKey } from '@/constants/rideTypes';
 import api from '@/services/api';
 import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    Image,
     Modal,
     Platform,
     StyleSheet,
@@ -17,27 +19,34 @@ import {
 
 interface Props {
   visible: boolean;
-  onComplete: (vehicle: { type: 'bike' | 'truck'; plateNumber: string }) => void;
+  onComplete: (vehicle: { type: string; plateNumber: string; rideType: RideTypeKey }) => void;
 }
 
+// First-time driver registration. The ride type picked here is
+// permanent — see driverController.updateMe, which rejects any later
+// attempt to change it — so this is the one and only place a driver ever
+// makes this choice.
 export default function VehicleSetupModal({ visible, onComplete }: Props) {
-  const [vehicleType, setVehicleType] = useState<'bike' | 'truck' | null>(null);
+  const [rideType, setRideType] = useState<RideTypeKey | null>(null);
   const [plateNumber, setPlateNumber] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const isValid = vehicleType !== null && plateNumber.trim().length >= 4;
+  const isValid = rideType !== null && plateNumber.trim().length >= 4;
 
   const handleSave = async () => {
     if (!isValid || saving) return;
     setSaving(true);
     try {
-      await api.patch('/drivers/me', {
-        vehicle: {
-          type: vehicleType,
-          plateNumber: plateNumber.trim().toUpperCase(),
-        },
+      const { data } = await api.patch('/drivers/me', {
+        rideType,
+        plateNumber: plateNumber.trim().toUpperCase(),
       });
-      onComplete({ type: vehicleType!, plateNumber: plateNumber.trim().toUpperCase() });
+      const vehicleType = data?.data?.vehicle?.type ?? DRIVER_RIDE_TYPES.find(r => r.type === rideType)?.vehicleClass;
+      onComplete({
+        type: vehicleType,
+        plateNumber: plateNumber.trim().toUpperCase(),
+        rideType: rideType!,
+      });
     } catch (err: any) {
       Alert.alert('Error', err?.response?.data?.message || 'Could not save vehicle info. Try again.');
     } finally {
@@ -51,63 +60,37 @@ export default function VehicleSetupModal({ visible, onComplete }: Props) {
         <View style={styles.sheet}>
           <View style={styles.dragHandle} />
 
-          {/* Icon */}
           <View style={styles.iconCircle}>
             <Ionicons name="car-outline" size={32} color={Colors.primary} />
           </View>
 
-          <Text style={styles.title}>Set Up Your Vehicle</Text>
+          <Text style={styles.title}>Register Your Ride Type</Text>
           <Text style={styles.subtitle}>
-            We need your vehicle details before you can go online and receive trips.
+            Choose the delivery type you'll be driving for. This can't be changed later, so pick carefully.
           </Text>
 
-          {/* Vehicle type selector */}
-          <Text style={styles.fieldLabel}>Vehicle Type</Text>
-          <View style={styles.typeRow}>
-            <TouchableOpacity
-              style={[styles.typeCard, vehicleType === 'bike' && styles.typeCardActive]}
-              onPress={() => setVehicleType('bike')}
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name="bicycle-outline"
-                size={28}
-                color={vehicleType === 'bike' ? Colors.primary : Colors.textSecondary}
-              />
-              <Text style={[styles.typeLabel, vehicleType === 'bike' && styles.typeLabelActive]}>
-                Bike
-              </Text>
-              <Text style={styles.typeDesc}>Packages & small deliveries</Text>
-              {vehicleType === 'bike' && (
-                <View style={styles.checkBadge}>
-                  <Ionicons name="checkmark" size={12} color="#fff" />
+          <View style={styles.typeList}>
+            {DRIVER_RIDE_TYPES.map((opt) => (
+              <TouchableOpacity
+                key={opt.type}
+                style={[styles.typeRow, rideType === opt.type && styles.typeRowActive]}
+                onPress={() => setRideType(opt.type)}
+                activeOpacity={0.8}
+              >
+                <Image source={opt.icon} style={styles.typeIcon} resizeMode="contain" />
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={[styles.typeLabel, rideType === opt.type && styles.typeLabelActive]}>
+                    {opt.label}
+                  </Text>
+                  <Text style={styles.typeDesc}>{opt.description}</Text>
                 </View>
-              )}
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.typeCard, vehicleType === 'truck' && styles.typeCardActive]}
-              onPress={() => setVehicleType('truck')}
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name="car-outline"
-                size={28}
-                color={vehicleType === 'truck' ? Colors.primary : Colors.textSecondary}
-              />
-              <Text style={[styles.typeLabel, vehicleType === 'truck' && styles.typeLabelActive]}>
-                Truck
-              </Text>
-              <Text style={styles.typeDesc}>House loads & large items</Text>
-              {vehicleType === 'truck' && (
-                <View style={styles.checkBadge}>
-                  <Ionicons name="checkmark" size={12} color="#fff" />
+                <View style={[styles.radio, rideType === opt.type && styles.radioActive]}>
+                  {rideType === opt.type && <View style={styles.radioDot} />}
                 </View>
-              )}
-            </TouchableOpacity>
+              </TouchableOpacity>
+            ))}
           </View>
 
-          {/* Plate number */}
           <Text style={styles.fieldLabel}>Plate Number</Text>
           <View style={styles.plateInput}>
             <Ionicons name="card-outline" size={18} color={Colors.textSecondary} style={{ marginRight: 10 }} />
@@ -123,7 +106,6 @@ export default function VehicleSetupModal({ visible, onComplete }: Props) {
             />
           </View>
 
-          {/* Save button */}
           <TouchableOpacity
             style={[styles.saveBtn, (!isValid || saving) && styles.saveBtnOff]}
             onPress={handleSave}
@@ -132,7 +114,7 @@ export default function VehicleSetupModal({ visible, onComplete }: Props) {
           >
             {saving
               ? <ActivityIndicator color="#fff" />
-              : <Text style={styles.saveBtnText}>Save & Go Online</Text>
+              : <Text style={styles.saveBtnText}>Register & Go Online</Text>
             }
           </TouchableOpacity>
         </View>
@@ -172,43 +154,33 @@ const styles = StyleSheet.create({
   subtitle: {
     fontFamily: Fonts.poppins.regular, fontSize: 13,
     color: Colors.textSecondary, textAlign: 'center',
-    lineHeight: 20, marginBottom: 24,
+    lineHeight: 20, marginBottom: 20,
   },
+
+  typeList: { width: '100%', gap: 10, marginBottom: 20 },
+  typeRow: {
+    flexDirection: 'row', alignItems: 'center',
+    borderRadius: 14, padding: 12,
+    borderWidth: 1.5, borderColor: Colors.border,
+    backgroundColor: Colors.white,
+  },
+  typeRowActive: { borderColor: Colors.primary, backgroundColor: `${Colors.primary}08` },
+  typeIcon: { width: 38, height: 38 },
+  typeLabel: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: Colors.textPrimary },
+  typeLabelActive: { color: Colors.primary },
+  typeDesc: { fontFamily: Fonts.poppins.regular, fontSize: 11, color: Colors.textSecondary, marginTop: 2 },
+  radio: {
+    width: 20, height: 20, borderRadius: 10,
+    borderWidth: 2, borderColor: Colors.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  radioActive: { borderColor: Colors.primary },
+  radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: Colors.primary },
 
   fieldLabel: {
     fontFamily: Fonts.poppins.semiBold, fontSize: 14,
     color: Colors.textPrimary, alignSelf: 'flex-start', marginBottom: 10,
   },
-
-  typeRow: { flexDirection: 'row', gap: 12, width: '100%', marginBottom: 20 },
-  typeCard: {
-    flex: 1, borderRadius: 16, padding: 16,
-    borderWidth: 1.5, borderColor: Colors.border,
-    backgroundColor: Colors.white,
-    alignItems: 'center', gap: 6,
-    position: 'relative',
-  },
-  typeCardActive: {
-    borderColor: Colors.primary,
-    backgroundColor: `${Colors.primary}08`,
-  },
-  typeLabel: {
-    fontFamily: Fonts.poppins.semiBold, fontSize: 15,
-    color: Colors.textSecondary,
-  },
-  typeLabelActive: { color: Colors.primary },
-  typeDesc: {
-    fontFamily: Fonts.poppins.regular, fontSize: 11,
-    color: Colors.textSecondary, textAlign: 'center',
-  },
-  checkBadge: {
-    position: 'absolute', top: -6, right: -6,
-    width: 20, height: 20, borderRadius: 10,
-    backgroundColor: Colors.primary,
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: Colors.white,
-  },
-
   plateInput: {
     flexDirection: 'row', alignItems: 'center',
     width: '100%', backgroundColor: Colors.lightGray,

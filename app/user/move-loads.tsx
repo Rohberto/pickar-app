@@ -1,7 +1,9 @@
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import api from '@/services/api';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
+import { format } from 'date-fns';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
@@ -12,7 +14,9 @@ import {
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -23,7 +27,30 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+// Mirrors send-package.tsx's scheduling minimums/defaults.
+const MIN_SCHEDULE_LEAD_MINUTES = 20;
+const defaultScheduleTime = () => {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() + MIN_SCHEDULE_LEAD_MINUTES + 10, 0, 0);
+  return d;
+};
+
 const GOOGLE_MAPS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
+
+// Lagos-only cap — interstate delivery isn't live yet, so every pickup and
+// destination picked right now must resolve to somewhere in Lagos state.
+// Checked against actual coordinates (same bounding box the backend
+// enforces) rather than address text — Google's description for
+// well-known areas often omits the state name, which made a text match
+// unreliable. Mirrors the same cap in send-package.tsx.
+const LAGOS_CENTER = { lat: 6.5244, lng: 3.3792 };
+const LAGOS_SEARCH_RADIUS_M = 60000;
+const LAGOS_BOUNDS = { minLat: 6.30, maxLat: 6.75, minLng: 2.65, maxLng: 4.35 };
+const isInLagos = (coords: { lat: number; lng: number }) =>
+  coords.lat >= LAGOS_BOUNDS.minLat && coords.lat <= LAGOS_BOUNDS.maxLat &&
+  coords.lng >= LAGOS_BOUNDS.minLng && coords.lng <= LAGOS_BOUNDS.maxLng;
+const NOT_LAGOS_MESSAGE =
+  'We currently only deliver within Lagos. Interstate delivery is coming soon — please choose a Lagos address.';
 
 // ─── Google Places helpers (same pattern as send-package.tsx) ─────
 interface Prediction {
@@ -43,6 +70,8 @@ const searchPlaces = async (query: string): Promise<Prediction[]> => {
       `?input=${encodeURIComponent(query)}` +
       `&key=${GOOGLE_MAPS_KEY}` +
       `&components=country:ng` +
+      `&location=${LAGOS_CENTER.lat},${LAGOS_CENTER.lng}` +
+      `&radius=${LAGOS_SEARCH_RADIUS_M}` +
       `&language=en`;
     const res = await fetch(url);
     const data = await res.json();
@@ -109,6 +138,48 @@ export default function MoveLoadsScreen() {
   const [selectLoading, setSelectLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  // ─── When: send now vs schedule for later ──────────────────────
+  const [sendMode, setSendMode] = useState<'now' | 'schedule'>('now');
+  const [scheduledFor, setScheduledFor] = useState<Date | null>(null);
+  const [tempScheduleDate, setTempScheduleDate] = useState<Date>(defaultScheduleTime());
+  const [showIOSPicker, setShowIOSPicker] = useState(false);
+  const [androidPickerStep, setAndroidPickerStep] = useState<'date' | 'time' | null>(null);
+
+  const openSchedulePicker = () => {
+    const base = scheduledFor && scheduledFor > new Date() ? scheduledFor : defaultScheduleTime();
+    setTempScheduleDate(base);
+    if (Platform.OS === 'ios') setShowIOSPicker(true);
+    else setAndroidPickerStep('date');
+  };
+
+  const handleIOSPickerChange = (_: DateTimePickerEvent, date?: Date) => {
+    if (date) setTempScheduleDate(date);
+  };
+
+  const confirmIOSSchedule = () => {
+    setScheduledFor(tempScheduleDate);
+    setShowIOSPicker(false);
+  };
+
+  const handleAndroidPickerChange = (event: DateTimePickerEvent, date?: Date) => {
+    if (event.type !== 'set' || !date) {
+      setAndroidPickerStep(null);
+      return;
+    }
+    if (androidPickerStep === 'date') {
+      const merged = new Date(tempScheduleDate);
+      merged.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
+      setTempScheduleDate(merged);
+      setAndroidPickerStep('time');
+    } else {
+      const merged = new Date(tempScheduleDate);
+      merged.setHours(date.getHours(), date.getMinutes(), 0, 0);
+      setTempScheduleDate(merged);
+      setScheduledFor(merged);
+      setAndroidPickerStep(null);
+    }
+  };
+
   const searchInputRef = useRef<TextInput>(null);
   const slideAnim = useRef(new Animated.Value(600)).current;
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -157,6 +228,10 @@ export default function MoveLoadsScreen() {
     try {
       const coords = await getPlaceCoords(pred.place_id);
       if (!coords) throw new Error('Could not get coordinates');
+      if (!isInLagos(coords)) {
+        Alert.alert('Lagos only for now', NOT_LAGOS_MESSAGE);
+        return;
+      }
       const result: AddressResult = { label: pred.description, coordinates: coords };
       setForm(prev => ({ ...prev, [activeField!]: result }));
       closeSearch();
@@ -184,10 +259,14 @@ export default function MoveLoadsScreen() {
       const label = addr
         ? [addr.street, addr.city, addr.subregion, addr.region].filter(Boolean).join(', ')
         : `${loc.coords.latitude.toFixed(5)}, ${loc.coords.longitude.toFixed(5)}`;
-      const result: AddressResult = {
-        label,
-        coordinates: { lat: loc.coords.latitude, lng: loc.coords.longitude },
-      };
+
+      const coords = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      if (!isInLagos(coords)) {
+        Alert.alert('Lagos only for now', NOT_LAGOS_MESSAGE);
+        return;
+      }
+
+      const result: AddressResult = { label, coordinates: coords };
       setForm(prev => ({ ...prev, [activeField!]: result }));
       closeSearch();
     } catch {
@@ -202,7 +281,8 @@ export default function MoveLoadsScreen() {
     form.pickup !== null &&
     form.destination !== null &&
     form.contactName.trim().length > 1 &&
-    form.contactPhone.trim().length >= 10;
+    form.contactPhone.trim().length >= 10 &&
+    (sendMode === 'now' || !!scheduledFor);
 
   // ─── Submit ───────────────────────────────────────────────────
   const handleSubmit = async () => {
@@ -220,6 +300,7 @@ export default function MoveLoadsScreen() {
         agreedToInsurance: true,
         loadDescription: form.loadDescription.trim(),
         rideType: 'truck',
+        scheduledFor: sendMode === 'schedule' && scheduledFor ? scheduledFor.toISOString() : undefined,
       });
 
       if (!initiateData.success) throw new Error(initiateData.message);
@@ -231,6 +312,20 @@ export default function MoveLoadsScreen() {
       });
 
       if (!rideData.success) throw new Error(rideData.message);
+
+      // Scheduled: pay now, park the trip in 'scheduled' status, and hand
+      // off to the same confirmation screen send-package.tsx uses — the
+      // sweep in scheduledDeliveryService.js starts the real search once
+      // the scheduled time arrives.
+      if (sendMode === 'schedule' && scheduledFor) {
+        const { data: confirmData } = await api.post(`/deliveries/${deliveryId}/confirm-pickup`);
+        if (!confirmData.success) throw new Error(confirmData.message);
+        router.replace({
+          pathname: '/user/scheduled-delivery',
+          params: { deliveryId },
+        } as never);
+        return;
+      }
 
       // Step 3 — navigate to finding driver screen
       router.replace({
@@ -372,6 +467,37 @@ export default function MoveLoadsScreen() {
             </View>
           </View>
 
+          {/* When */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>When</Text>
+            <View style={styles.whenRow}>
+              <Pressable
+                style={[styles.whenPill, sendMode === 'now' && styles.whenPillActive]}
+                onPress={() => setSendMode('now')}
+              >
+                <Ionicons name="flash-outline" size={16} color={sendMode === 'now' ? '#fff' : Colors.textSecondary} />
+                <Text style={[styles.whenPillText, sendMode === 'now' && styles.whenPillTextActive]}>Send now</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.whenPill, sendMode === 'schedule' && styles.whenPillActive]}
+                onPress={() => setSendMode('schedule')}
+              >
+                <Ionicons name="calendar-outline" size={16} color={sendMode === 'schedule' ? '#fff' : Colors.textSecondary} />
+                <Text style={[styles.whenPillText, sendMode === 'schedule' && styles.whenPillTextActive]}>Schedule for later</Text>
+              </Pressable>
+            </View>
+
+            {sendMode === 'schedule' && (
+              <TouchableOpacity style={styles.scheduleBtn} onPress={openSchedulePicker} activeOpacity={0.8}>
+                <Ionicons name="time-outline" size={18} color={Colors.textSecondary} />
+                <Text style={[styles.scheduleBtnText, !scheduledFor && styles.locationPlaceholder]}>
+                  {scheduledFor ? format(scheduledFor, "EEE d MMM, h:mm a") : 'Choose date & time'}
+                </Text>
+                <Ionicons name="chevron-forward" size={16} color={Colors.textSecondary} />
+              </TouchableOpacity>
+            )}
+          </View>
+
           {/* Info banner */}
           <View style={styles.infoBanner}>
             <Ionicons name="information-circle-outline" size={20} color={Colors.primary} />
@@ -503,6 +629,43 @@ export default function MoveLoadsScreen() {
           )}
         </Animated.View>
       )}
+
+      {/* Android: native dialogs, date then time, auto-dismiss and chain */}
+      {Platform.OS === 'android' && androidPickerStep && (
+        <DateTimePicker
+          value={tempScheduleDate}
+          mode={androidPickerStep}
+          display="default"
+          minimumDate={new Date()}
+          onChange={handleAndroidPickerChange}
+        />
+      )}
+
+      {/* iOS: inline spinner in a sheet with an explicit Done button */}
+      <Modal visible={showIOSPicker} transparent animationType="slide" onRequestClose={() => setShowIOSPicker(false)}>
+        <Pressable style={styles.pickerOverlay} onPress={() => setShowIOSPicker(false)}>
+          <Pressable style={styles.pickerSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.pickerHeader}>
+              <Pressable onPress={() => setShowIOSPicker(false)}>
+                <Text style={styles.pickerCancelText}>Cancel</Text>
+              </Pressable>
+              <Text style={styles.pickerTitle}>Schedule pickup</Text>
+              <Pressable onPress={confirmIOSSchedule}>
+                <Text style={styles.pickerDoneText}>Done</Text>
+              </Pressable>
+            </View>
+            {showIOSPicker && (
+              <DateTimePicker
+                value={tempScheduleDate}
+                mode="datetime"
+                display="spinner"
+                minimumDate={new Date()}
+                onChange={handleIOSPickerChange}
+              />
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -574,6 +737,33 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.poppins.regular, fontSize: 11,
     color: Colors.textSecondary, textAlign: 'right', marginTop: 6,
   },
+
+  whenRow: { flexDirection: 'row', gap: 10 },
+  whenPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    borderWidth: 1, borderColor: Colors.border, borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 12, backgroundColor: '#fff',
+  },
+  whenPillActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  whenPillText: { fontFamily: Fonts.poppins.medium, fontSize: 13, color: Colors.textSecondary },
+  whenPillTextActive: { color: '#fff' },
+  scheduleBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: '#fff', borderRadius: 14, padding: 16, marginTop: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06, shadowRadius: 8, elevation: 3,
+  },
+  scheduleBtnText: { flex: 1, fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textPrimary },
+
+  pickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  pickerSheet: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 40 },
+  pickerHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    padding: 20, borderBottomWidth: 1, borderBottomColor: Colors.border,
+  },
+  pickerTitle: { fontFamily: Fonts.poppins.semiBold, fontSize: 18, color: Colors.textPrimary },
+  pickerCancelText: { fontFamily: Fonts.poppins.regular, fontSize: 15, color: Colors.textSecondary },
+  pickerDoneText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.primary },
 
   infoBanner: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 10,

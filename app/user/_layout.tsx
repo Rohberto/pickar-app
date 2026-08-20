@@ -24,6 +24,7 @@ export default function UserLayout() {
       <Stack.Screen name="send-package" />
       <Stack.Screen name="choose-ride" />
       <Stack.Screen name="confirm-pickup" />
+      <Stack.Screen name="scheduled-delivery" />
       <Stack.Screen name="delivery-instructions" />
       <Stack.Screen name="track-package" />
       <Stack.Screen name="delivery-complete" />

@@ -132,6 +132,11 @@ export default function NavigatePickupScreen() {
   const currentStepRef      = useRef(0);
   const isMountedRef        = useRef(false);
   const instructionAnim     = useRef(new Animated.Value(0)).current;
+  // Route re-fetch tracking — lets us reroute like real turn-by-turn nav
+  // instead of freezing the polyline/ETA at whatever they were when
+  // "Start Navigation" was first tapped.
+  const lastRouteFetchAtRef = useRef(0);
+  const lastRouteOriginRef  = useRef<{ latitude: number; longitude: number } | null>(null);
 useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as never));
   // ─── Mount ────────────────────────────────────────────────────
   useEffect(() => {
@@ -170,6 +175,8 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
   // ─── Fetch Google Directions route + steps ───────────────────
   const fetchRoute = async (fromLat: number, fromLng: number) => {
     if (!GOOGLE_MAPS_KEY) return;
+    lastRouteFetchAtRef.current = Date.now();
+    lastRouteOriginRef.current = { latitude: fromLat, longitude: fromLng };
     setRouteLoading(true);
     try {
       const url =
@@ -252,8 +259,16 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
   // ─── Called on every GPS update ──────────────────────────────
   const onLocationUpdate = (lat: number, lng: number) => {
     const distM = haversineMetres(lat, lng, pickupLat, pickupLng);
-    setDistanceLeft(formatDistance(distM));
-    setEtaLeft(formatEta((distM / 20000) * 3600)); // rough fallback until Google responds
+
+    // Before Google Directions data has loaded, fall back to a straight-line
+    // estimate so the UI isn't blank. Once a real route exists we leave
+    // distance/ETA to fetchRoute — straight-line distance is a poor proxy
+    // for actual road distance and was overwriting accurate data on every
+    // GPS tick, which is why navigation looked inaccurate.
+    if (stepsRef.current.length === 0) {
+      setDistanceLeft(formatDistance(distM));
+      setEtaLeft(formatEta((distM / 20000) * 3600));
+    }
 
     // Auto-advance turn-by-turn step
     const currentSteps = stepsRef.current;
@@ -263,6 +278,19 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
       const distToStepEnd = haversineMetres(lat, lng, step.endLat, step.endLng);
       if (distToStepEnd < 30) {
         setCurrentStepIndex(idx + 1);
+      }
+    }
+
+    // Reroute periodically while navigating so the polyline, turn-by-turn
+    // steps, and distance/ETA stay accurate to the driver's real position
+    // instead of drifting from a single snapshot taken at nav start —
+    // mirrors how Google Maps recalculates as you drive.
+    if (navigationActive) {
+      const last = lastRouteOriginRef.current;
+      const movedFar = !last || haversineMetres(lat, lng, last.latitude, last.longitude) > 60;
+      const stale = Date.now() - lastRouteFetchAtRef.current > 20000;
+      if (movedFar && stale) {
+        fetchRoute(lat, lng);
       }
     }
 

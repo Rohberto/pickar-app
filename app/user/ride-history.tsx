@@ -31,6 +31,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; 
   driver_assigned: { label: 'Driver Assigned',  color: '#9333EA', bg: '#F3E8FF', icon: 'person'          },
   driver_arrived:  { label: 'Driver Arrived',   color: '#EA580C', bg: '#FFEDD5', icon: 'location'        },
   finding_driver:  { label: 'Finding Driver',   color: '#CA8A04', bg: '#FEF9C3', icon: 'search'          },
+  scheduled:       { label: 'Scheduled',        color: '#0891B2', bg: '#CFFAFE', icon: 'calendar'        },
   cancelled:       { label: 'Cancelled',        color: '#DC2626', bg: '#FEE2E2', icon: 'close-circle'    },
   pending:         { label: 'Pending',          color: '#6B7280', bg: '#F3F4F6', icon: 'time'            },
 };
@@ -92,8 +93,16 @@ export default function RideHistoryScreen() {
         style={styles.card}
         activeOpacity={0.85}
         onPress={() => {
-          // If delivery is still active, resume tracking
-          if (!['delivered', 'cancelled'].includes(item.status)) {
+          // If delivery is still active, resume tracking — scheduled trips
+          // go to their own status screen, everything else in-flight goes
+          // to finding-driver.tsx (which also handles driver_assigned and
+          // beyond).
+          if (item.status === 'scheduled') {
+            router.push({
+              pathname: '/user/scheduled-delivery',
+              params: { deliveryId: item._id },
+            } as never);
+          } else if (!['delivered', 'cancelled'].includes(item.status)) {
             router.push({
               pathname: '/user/finding-driver',
               params: { deliveryId: item._id },

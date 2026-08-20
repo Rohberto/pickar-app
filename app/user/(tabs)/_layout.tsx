@@ -1,8 +1,8 @@
+import { HomeLogoIcon } from '@/components/HomeLogoIcon';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
-import { HomeLogoIcon } from '../../../components/HomeLogoIcon';
 
 export default function UserTabLayout() {
   return (

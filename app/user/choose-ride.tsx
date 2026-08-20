@@ -4,10 +4,11 @@ import api from '@/services/api';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Dimensions,
   Image,
   Modal,
   Pressable,
@@ -17,6 +18,77 @@ import {
   Text,
   View,
 } from 'react-native';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+
+const GOOGLE_MAPS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
+
+// No custom style here on purpose — this map is left on Google's default
+// styling (real road/area labels, POI icons, colored parks/water) so it
+// reads as a "rich" map like Bolt/Uber's route preview, instead of the
+// flattened/desaturated look a custom style gives.
+
+// ─── Compass bearing from A to B, in degrees (0 = north) ──────────────
+const bearingBetween = (from: { lat: number; lng: number }, to: { lat: number; lng: number }) => {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+  const lat1 = toRad(from.lat), lat2 = toRad(to.lat);
+  const dLng = toRad(to.lng - from.lng);
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+};
+
+// ─── Straight-line distance (meters) — used to frame the map immediately,
+// before (or even if) the real route ever comes back from Directions, so
+// pickup/destination are always visible instead of the camera sitting at
+// its generic Lagos-wide initialRegion. This is what "sometimes the line
+// doesn't draw" actually was: the polyline itself was there (a dashed
+// straight line renders as a fallback even without Directions), it just
+// wasn't ever inside the visible viewport when that API call was slow,
+// failed, or returned no route.
+const haversineMeters = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+};
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// ─── Zoom level that makes `spanMeters` fill roughly `fractionOfScreen`
+// of the map's width, at the given latitude ─────────────────────────
+// Standard Web Mercator meters-per-pixel-at-zoom-0 formula. Computed fresh
+// from the actual route distance every time (never reads the current/prior
+// camera state), so repeated calls always land on the same framing instead
+// of compounding zoom-out on top of whatever the camera already was.
+const zoomForSpan = (spanMeters: number, atLat: number, fractionOfScreen = 0.55) => {
+  const targetPx = SCREEN_WIDTH * fractionOfScreen;
+  const metersPerPixelAtZoom0 = 156543.03392 * Math.cos((atLat * Math.PI) / 180);
+  const zoom = Math.log2((metersPerPixelAtZoom0 * targetPx) / Math.max(spanMeters, 150));
+  return Math.max(9, Math.min(17, zoom));
+};
+
+// ─── Decode Google encoded polyline (same helper as the nav screens) ──
+const decodePolyline = (encoded: string): { latitude: number; longitude: number }[] => {
+  const poly: { latitude: number; longitude: number }[] = [];
+  let index = 0, lat = 0, lng = 0;
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lat += result & 1 ? ~(result >> 1) : result >> 1;
+    shift = 0; result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lng += result & 1 ? ~(result >> 1) : result >> 1;
+    poly.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+  }
+  return poly;
+};
+
+interface Coords { lat: number; lng: number }
 
 interface RideOption {
   rideType: string;
@@ -56,10 +128,18 @@ export default function ChooseRideScreen() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [destination, setDestination] = useState('');
+  const [pickupLabel, setPickupLabel] = useState('');
+  const [pickupCoords, setPickupCoords] = useState<Coords | null>(null);
+  const [destCoords, setDestCoords] = useState<Coords | null>(null);
+  const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
+  const [routeDistanceText, setRouteDistanceText] = useState('');
+  const [routeDurationText, setRouteDurationText] = useState('');
 
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [walletBalance, setWalletBalance] = useState<number | null>(null);
   const [walletLoading, setWalletLoading] = useState(false);
+
+  const mapRef = useRef<MapView>(null);
 
   useEffect(() => {
     fetchRideOptions();
@@ -70,10 +150,83 @@ export default function ChooseRideScreen() {
     try {
       const response = await api.get(`/deliveries/${deliveryId}/status`);
       if (response.data.success) {
-        setDestination(response.data.data.recipient?.address?.label || 'Destination');
+        const delivery = response.data.data;
+        setDestination(delivery.recipient?.address?.label || 'Destination');
+        setPickupLabel(delivery.pickupAddress?.label || 'Pickup location');
+
+        const pickup = delivery.pickupAddress?.coordinates;
+        const dest = delivery.recipient?.address?.coordinates;
+        if (pickup?.lat && dest?.lat) {
+          setPickupCoords(pickup);
+          setDestCoords(dest);
+          // Frame the camera on pickup/destination right away, using the
+          // straight-line distance between them. Previously the camera
+          // only moved once fetchRoute's Directions call succeeded, so if
+          // that request was slow, rate-limited, or failed, the map just
+          // sat at its generic city-wide initialRegion — the dashed
+          // fallback line was technically drawn, it just wasn't inside
+          // the visible viewport. This guarantees it always is.
+          frameRoute(pickup, dest, haversineMeters(pickup, dest));
+          fetchRoute(pickup, dest);
+        }
       }
     } catch (error: any) {
       console.error('Error fetching delivery:', error);
+    }
+  };
+
+  // Rotate + zoom the camera so pickup → destination reads horizontally
+  // (pickup left, destination right), regardless of which real-world
+  // compass direction the route actually runs — matches how ride apps
+  // present the route preview. spanMeters drives the zoom level so pickup
+  // and destination always land a consistent, clearly-separated distance
+  // apart on screen instead of drifting zoomed-out over repeated calls.
+  const frameRoute = (pickup: Coords, dest: Coords, spanMeters: number) => {
+    const bearing = bearingBetween(pickup, dest);
+    const heading = (bearing - 90 + 360) % 360;
+    const center = {
+      latitude: (pickup.lat + dest.lat) / 2,
+      longitude: (pickup.lng + dest.lng) / 2,
+    };
+    const zoom = zoomForSpan(spanMeters, center.latitude);
+    setTimeout(() => {
+      mapRef.current?.animateCamera(
+        { center, heading, zoom, pitch: 0 },
+        { duration: 500 }
+      );
+    }, 100);
+  };
+
+  // ─── Route preview — real road distance/duration, not a straight line ──
+  const fetchRoute = async (pickup: Coords, dest: Coords) => {
+    if (!GOOGLE_MAPS_KEY) return;
+    try {
+      const url =
+        `https://maps.googleapis.com/maps/api/directions/json` +
+        `?origin=${pickup.lat},${pickup.lng}` +
+        `&destination=${dest.lat},${dest.lng}` +
+        `&mode=driving` +
+        `&key=${GOOGLE_MAPS_KEY}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.status === 'OK' && data.routes.length > 0) {
+        const leg = data.routes[0].legs[0];
+        const decoded = decodePolyline(data.routes[0].overview_polyline.points);
+        setRouteCoords(decoded);
+        setRouteDistanceText(leg.distance.text);
+        setRouteDurationText(leg.duration.text);
+        // Re-frame using the real route distance now that we have it —
+        // refines the initial straight-line-based framing above.
+        frameRoute(pickup, dest, leg.distance.value);
+      } else {
+        // Directions failed (ZERO_RESULTS, OVER_QUERY_LIMIT, etc). The
+        // dashed straight-line fallback still renders and the camera is
+        // already framed from fetchDeliveryDetails, so the user still
+        // sees a line — just not the real road route.
+        console.warn('[ChooseRide] Directions API returned', data.status);
+      }
+    } catch (err) {
+      console.error('[ChooseRide] fetchRoute error:', err);
     }
   };
 
@@ -168,22 +321,77 @@ const getRideIcon = (type: string) => {
     <View style={styles.container}>
       <StatusBar style="dark" />
 
-      {/* Top Section - Light Gray Background */}
-      <View style={styles.topSection}>
-        <SafeAreaView>
-          {/* Header */}
-          <View style={styles.header}>
-            <Pressable onPress={() => router.back()} style={styles.backButtonCircle}>
-              <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
-            </Pressable>
-            <View style={styles.locationBar}>
-              <Ionicons name="search-outline" size={20} color={Colors.textSecondary} />
-              <Text style={styles.locationText} numberOfLines={1}>
-                {destination}
-              </Text>
-              <Ionicons name="location-outline" size={20} color={Colors.textSecondary} />
-            </View>
-          </View>
+      {/* Top Section - Route Map ─────────────────────────────────── */}
+      <View style={styles.mapSection}>
+        <MapView
+          ref={mapRef}
+          style={StyleSheet.absoluteFillObject}
+          provider={PROVIDER_GOOGLE}
+          showsCompass={false}
+          showsMyLocationButton={false}
+          toolbarEnabled={false}
+          initialRegion={{
+            latitude: pickupCoords?.lat ?? destCoords?.lat ?? 6.5244,
+            longitude: pickupCoords?.lng ?? destCoords?.lng ?? 3.3792,
+            latitudeDelta: 0.06,
+            longitudeDelta: 0.06,
+          }}
+        >
+          {routeCoords.length > 0 ? (
+            <Polyline coordinates={routeCoords} strokeColor={Colors.primary} strokeWidth={4} />
+          ) : pickupCoords && destCoords ? (
+            <Polyline
+              coordinates={[
+                { latitude: pickupCoords.lat, longitude: pickupCoords.lng },
+                { latitude: destCoords.lat, longitude: destCoords.lng },
+              ]}
+              strokeColor={`${Colors.primary}60`}
+              strokeWidth={2}
+              lineDashPattern={[8, 6]}
+            />
+          ) : null}
+
+          {/* Pins with short labeled bubbles, styled like the Bolt/Uber
+              route preview — this is the only place trip info lives on
+              this screen now, no separate floating text bar. */}
+          {pickupCoords && (
+            <Marker
+              coordinate={{ latitude: pickupCoords.lat, longitude: pickupCoords.lng }}
+              anchor={{ x: 0.5, y: 1 }}
+              tracksViewChanges={false}
+            >
+              <View style={styles.pickupBubbleWrapper}>
+                <View style={styles.pickupBubble}>
+                  <Text style={styles.pickupBubbleText}>Pickup</Text>
+                </View>
+                <View style={styles.bubbleTip} />
+              </View>
+            </Marker>
+          )}
+
+          {destCoords && (
+            <Marker
+              coordinate={{ latitude: destCoords.lat, longitude: destCoords.lng }}
+              anchor={{ x: 0.5, y: 1 }}
+              tracksViewChanges={false}
+            >
+              <View style={styles.destBubbleWrapper}>
+                <View style={styles.destBubble}>
+                  <Text style={styles.destBubbleText}>
+                    {routeDurationText ? `Delivery in ${routeDurationText}` : 'Delivery'}
+                  </Text>
+                </View>
+                <View style={[styles.bubbleTip, styles.destBubbleTip]} />
+              </View>
+            </Marker>
+          )}
+        </MapView>
+
+        {/* Minimal back button — no address text box on the map anymore */}
+        <SafeAreaView style={styles.backBtnSafeArea}>
+          <Pressable onPress={() => router.back()} style={styles.mapBackBtn}>
+            <Ionicons name="close" size={20} color={Colors.textPrimary} />
+          </Pressable>
         </SafeAreaView>
       </View>
 
@@ -260,7 +468,7 @@ const getRideIcon = (type: string) => {
           <View style={{ height: 100 }} />
         </ScrollView>
 
-        {/* Select Ride Button - BEFORE Calendar Icon */}
+        {/* Select Ride Button */}
         <View style={styles.buttonContainer}>
           <Pressable
             style={styles.selectButton}
@@ -272,9 +480,6 @@ const getRideIcon = (type: string) => {
             ) : (
               <Text style={styles.selectButtonText}>Select Ride</Text>
             )}
-          </Pressable>
-          <Pressable style={styles.floatingButton}>
-            <Ionicons name="calendar-outline" size={24} color={Colors.white} />
           </Pressable>
         </View>
       </View>
@@ -335,47 +540,54 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   
-  // Top Section - Light Gray
-  topSection: {
+  // Top Section - Route Map
+  mapSection: {
+    height: 260,
     backgroundColor: '#F3F4F6',
-    paddingBottom: 12,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 12,
+  backBtnSafeArea: {
+    position: 'absolute',
+    top: 0, left: 0,
   },
-  backButtonCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  mapBackBtn: {
+    marginTop: 12,
+    marginLeft: 16,
+    width: 36, height: 36, borderRadius: 18,
     backgroundColor: Colors.white,
-    justifyContent: 'center',
-    alignItems: 'center',
+    alignItems: 'center', justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  locationBar: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: Colors.white,
-    borderRadius: 24,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    gap: 8,
+
+  // Marker bubbles — matches the labeled-pin look of the reference map
+  pickupBubbleWrapper: { alignItems: 'center' },
+  pickupBubble: {
+    backgroundColor: Colors.textPrimary,
+    borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 6,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15, shadowRadius: 4, elevation: 4,
   },
-  locationText: {
-    flex: 1,
-    fontSize: 13,
-    fontFamily: Fonts.poppins.regular,
-    color: Colors.textPrimary,
+  pickupBubbleText: { fontFamily: Fonts.poppins.semiBold, fontSize: 11, color: Colors.white },
+  destBubbleWrapper: { alignItems: 'center' },
+  destBubble: {
+    backgroundColor: Colors.primary,
+    borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 6,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15, shadowRadius: 4, elevation: 4,
   },
+  destBubbleText: { fontFamily: Fonts.poppins.semiBold, fontSize: 11, color: Colors.white },
+  bubbleTip: {
+    width: 0, height: 0,
+    borderLeftWidth: 5, borderRightWidth: 5, borderTopWidth: 6,
+    borderLeftColor: 'transparent', borderRightColor: 'transparent',
+    borderTopColor: Colors.textPrimary, marginTop: -1,
+  },
+  destBubbleTip: { borderTopColor: Colors.primary },
 
   // White Section with Border Radius
   whiteSection: {
@@ -533,15 +745,6 @@ walletButton: {
     fontFamily: Fonts.poppins.semiBold,
     color: Colors.white,
   },
-  floatingButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Colors.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
   // Wallet Modal
   walletOverlay: {
     flex: 1,

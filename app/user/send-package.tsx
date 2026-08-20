@@ -1,7 +1,9 @@
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import api from '@/services/api';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
+import { format } from 'date-fns';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -11,6 +13,7 @@ import {
   Alert,
   FlatList,
   Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -21,7 +24,33 @@ import {
 } from 'react-native';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 
+// Minimum lead time enforced client-side too (mirrors the backend check)
+// so the picker never lets someone pick a time that'll just get rejected.
+const MIN_SCHEDULE_LEAD_MINUTES = 20;
+const defaultScheduleTime = () => {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() + MIN_SCHEDULE_LEAD_MINUTES + 10, 0, 0);
+  return d;
+};
+
 const GOOGLE_MAPS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
+
+// Lagos-only cap — interstate delivery isn't live yet, so every pickup and
+// destination picked right now must resolve to somewhere in Lagos state.
+// Bias search results toward Lagos and hard-block anything that resolves
+// outside it. Checked against actual coordinates (same bounding box the
+// backend enforces) rather than the address text — Google's description
+// for well-known areas (e.g. "Ikorodu") often omits the state name
+// entirely, which made a text match unreliable and rejected real Lagos
+// addresses.
+const LAGOS_CENTER = { lat: 6.5244, lng: 3.3792 };
+const LAGOS_SEARCH_RADIUS_M = 60000;
+const LAGOS_BOUNDS = { minLat: 6.30, maxLat: 6.75, minLng: 2.65, maxLng: 4.35 };
+const isInLagos = (coords: { lat: number; lng: number }) =>
+  coords.lat >= LAGOS_BOUNDS.minLat && coords.lat <= LAGOS_BOUNDS.maxLat &&
+  coords.lng >= LAGOS_BOUNDS.minLng && coords.lng <= LAGOS_BOUNDS.maxLng;
+const NOT_LAGOS_MESSAGE =
+  'We currently only deliver within Lagos. Interstate delivery is coming soon — please choose a Lagos address.';
 
 interface LocationData {
   label: string;
@@ -37,18 +66,8 @@ interface Prediction {
   };
 }
 
-interface WeightTier {
-  id: string;
-  label: string;
-  weightKg: number;
-}
-
-const WEIGHT_TIERS: WeightTier[] = [
-  { id: 'under_3kg', label: 'Under 3kg', weightKg: 1 },
-  { id: '3_10kg', label: '3kg – 10kg', weightKg: 6 },
-  { id: '10_25kg', label: '10kg – 25kg', weightKg: 17 },
-  { id: 'over_25kg', label: 'Over 25kg (Truck only)', weightKg: 30 },
-];
+const MIN_WEIGHT_KG = 0.1;
+const MAX_WEIGHT_KG = 1000;
 
 // ─── Google Places API Helpers ─────────────────────────────────────
 const searchPlaces = async (query: string): Promise<Prediction[]> => {
@@ -59,12 +78,17 @@ const searchPlaces = async (query: string): Promise<Prediction[]> => {
       `?input=${encodeURIComponent(query)}` +
       `&key=${GOOGLE_MAPS_KEY}` +
       `&components=country:ng` +
+      `&location=${LAGOS_CENTER.lat},${LAGOS_CENTER.lng}` +
+      `&radius=${LAGOS_SEARCH_RADIUS_M}` +
       `&language=en`;
     const res = await fetch(url);
     const data = await res.json();
-    if (data.status !== 'OK') {
-  console.error('[Places] status:', data.status, data.error_message);
-}
+    // ZERO_RESULTS just means nothing matched this query yet (normal while
+    // typing) — not an error. Only log genuinely broken responses, and use
+    // warn (not error) so it doesn't trigger the LogBox red screen in dev.
+    if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+      console.warn('[Places] status:', data.status, data.error_message);
+    }
     return data.status === 'OK' ? data.predictions ?? [] : [];
   } catch (err) {
     console.error('[Places] autocomplete error:', err);
@@ -78,7 +102,7 @@ const getPlaceCoords = async (placeId: string): Promise<{ lat: number; lng: numb
       `https://maps.googleapis.com/maps/api/place/details/json` +
       `?place_id=${placeId}` +
       `&fields=geometry,formatted_address` +
-      `&key=AIzaSyCKM6_Sg7hd1Omb8FbmNl_PUyByh84-8wQ`;
+      `&key=${GOOGLE_MAPS_KEY}`;
     const res = await fetch(url);
     const data = await res.json();
     if (data.status === 'OK') {
@@ -100,13 +124,61 @@ export default function SendPackageScreen() {
   const [recipientName, setRecipientName] = useState('');
   const [recipientPhone, setRecipientPhone] = useState('');
   const [packageType, setPackageType] = useState<'fragile' | 'non_fragile' | null>(null);
-  const [weightTier, setWeightTier] = useState<WeightTier | null>(null);
+  const [weightInput, setWeightInput] = useState('');
   const [agreedToInsurance, setAgreedToInsurance] = useState(true);
+
+  // ─── When: send now vs schedule for later ──────────────────────
+  const [sendMode, setSendMode] = useState<'now' | 'schedule'>('now');
+  const [scheduledFor, setScheduledFor] = useState<Date | null>(null);
+  const [tempScheduleDate, setTempScheduleDate] = useState<Date>(defaultScheduleTime());
+  const [showIOSPicker, setShowIOSPicker] = useState(false);
+  const [androidPickerStep, setAndroidPickerStep] = useState<'date' | 'time' | null>(null);
+
+  const openSchedulePicker = () => {
+    const base = scheduledFor && scheduledFor > new Date() ? scheduledFor : defaultScheduleTime();
+    setTempScheduleDate(base);
+    if (Platform.OS === 'ios') setShowIOSPicker(true);
+    else setAndroidPickerStep('date');
+  };
+
+  const handleIOSPickerChange = (_: DateTimePickerEvent, date?: Date) => {
+    if (date) setTempScheduleDate(date);
+  };
+
+  const confirmIOSSchedule = () => {
+    setScheduledFor(tempScheduleDate);
+    setShowIOSPicker(false);
+  };
+
+  const handleAndroidPickerChange = (event: DateTimePickerEvent, date?: Date) => {
+    if (event.type !== 'set' || !date) {
+      setAndroidPickerStep(null);
+      return;
+    }
+    if (androidPickerStep === 'date') {
+      const merged = new Date(tempScheduleDate);
+      merged.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
+      setTempScheduleDate(merged);
+      setAndroidPickerStep('time');
+    } else {
+      const merged = new Date(tempScheduleDate);
+      merged.setHours(date.getHours(), date.getMinutes(), 0, 0);
+      setTempScheduleDate(merged);
+      setScheduledFor(merged);
+      setAndroidPickerStep(null);
+    }
+  };
 
   const [showPickupSearch, setShowPickupSearch] = useState(false);
   const [showDestinationSearch, setShowDestinationSearch] = useState(false);
   const [showPackageTypeModal, setShowPackageTypeModal] = useState(false);
-  const [showWeightModal, setShowWeightModal] = useState(false);
+
+  const parsedWeight = parseFloat(weightInput);
+  const isWeightValid =
+    weightInput.trim().length > 0 &&
+    !isNaN(parsedWeight) &&
+    parsedWeight >= MIN_WEIGHT_KG &&
+    parsedWeight <= MAX_WEIGHT_KG;
 
   const [pickupQuery, setPickupQuery] = useState('');
   const [destinationQuery, setDestinationQuery] = useState('');
@@ -147,6 +219,11 @@ export default function SendPackageScreen() {
         label: pred.description,
         coordinates: coords,
       };
+
+      if (!isInLagos(location.coordinates)) {
+        Alert.alert('Lagos only for now', NOT_LAGOS_MESSAGE);
+        return;
+      }
 
       if (isPickup) {
         setPickupAddress(location);
@@ -192,6 +269,11 @@ export default function SendPackageScreen() {
         coordinates: { lat: loc.coords.latitude, lng: loc.coords.longitude },
       };
 
+      if (!isInLagos(location.coordinates)) {
+        Alert.alert('Lagos only for now', NOT_LAGOS_MESSAGE);
+        return;
+      }
+
       if (isPickup) {
         setPickupAddress(location);
         setPickupQuery(label);
@@ -215,7 +297,12 @@ export default function SendPackageScreen() {
     if (!recipientName.trim()) return Alert.alert('Error', 'Please enter recipient name.');
     if (!recipientPhone.trim()) return Alert.alert('Error', 'Please enter recipient phone.');
     if (!packageType) return Alert.alert('Error', 'Please select package type.');
-    if (!weightTier) return Alert.alert('Error', 'Please select an estimated weight.');
+    if (!isWeightValid) {
+      return Alert.alert('Error', `Please enter a valid weight between ${MIN_WEIGHT_KG}kg and ${MAX_WEIGHT_KG}kg.`);
+    }
+    if (sendMode === 'schedule' && !scheduledFor) {
+      return Alert.alert('Error', 'Please choose a date and time for your scheduled delivery.');
+    }
 
     setFormLoading(true);
     try {
@@ -228,8 +315,9 @@ export default function SendPackageScreen() {
         recipientName: recipientName.trim(),
         recipientPhone: recipientPhone.trim(),
         packageType,
-        weightKg: weightTier.weightKg,
+        weightKg: parsedWeight,
         agreedToInsurance,
+        scheduledFor: sendMode === 'schedule' && scheduledFor ? scheduledFor.toISOString() : undefined,
       });
 
       if (data.success) {
@@ -251,7 +339,8 @@ export default function SendPackageScreen() {
     !!recipientName.trim() &&
     !!recipientPhone.trim() &&
     !!packageType &&
-    !!weightTier;
+    isWeightValid &&
+    (sendMode === 'now' || !!scheduledFor);
 
   // Map Preview Component
   const LocationMapPreview = ({ address, title }: { address: LocationData | null; title: string }) => {
@@ -464,18 +553,55 @@ export default function SendPackageScreen() {
 
         {/* Weight */}
         <View style={styles.inputSection}>
-          <Text style={styles.inputLabel}>Estimated Weight</Text>
-          <Pressable style={styles.locationBtn} onPress={() => setShowWeightModal(true)}>
-            <Ionicons
-              name="scale-outline"
-              size={20}
-              color={weightTier ? Colors.primary : Colors.textSecondary}
+          <Text style={styles.inputLabel}>Package Weight (kg)</Text>
+          <View style={styles.weightInputRow}>
+            <Ionicons name="scale-outline" size={20} color={Colors.textSecondary} />
+            <TextInput
+              style={styles.weightInput}
+              placeholder="Enter actual weight, e.g. 4.5"
+              placeholderTextColor={Colors.textSecondary}
+              keyboardType="decimal-pad"
+              value={weightInput}
+              onChangeText={(t) => setWeightInput(t.replace(/[^0-9.]/g, ''))}
             />
-            <Text style={[styles.locationBtnText, !weightTier && styles.placeholder]}>
-              {weightTier?.label ?? 'Select estimated weight'}
+            <Text style={styles.weightUnit}>kg</Text>
+          </View>
+          {weightInput.length > 0 && !isWeightValid && (
+            <Text style={styles.weightError}>
+              Enter a weight between {MIN_WEIGHT_KG}kg and {MAX_WEIGHT_KG}kg.
             </Text>
-            <Ionicons name="chevron-forward" size={18} color={Colors.textSecondary} />
-          </Pressable>
+          )}
+        </View>
+
+        {/* When */}
+        <View style={styles.inputSection}>
+          <Text style={styles.inputLabel}>When</Text>
+          <View style={styles.whenRow}>
+            <Pressable
+              style={[styles.whenPill, sendMode === 'now' && styles.whenPillActive]}
+              onPress={() => setSendMode('now')}
+            >
+              <Ionicons name="flash-outline" size={16} color={sendMode === 'now' ? Colors.white : Colors.textSecondary} />
+              <Text style={[styles.whenPillText, sendMode === 'now' && styles.whenPillTextActive]}>Send now</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.whenPill, sendMode === 'schedule' && styles.whenPillActive]}
+              onPress={() => setSendMode('schedule')}
+            >
+              <Ionicons name="calendar-outline" size={16} color={sendMode === 'schedule' ? Colors.white : Colors.textSecondary} />
+              <Text style={[styles.whenPillText, sendMode === 'schedule' && styles.whenPillTextActive]}>Schedule for later</Text>
+            </Pressable>
+          </View>
+
+          {sendMode === 'schedule' && (
+            <Pressable style={[styles.locationBtn, { marginTop: 12 }]} onPress={openSchedulePicker}>
+              <Ionicons name="time-outline" size={20} color={Colors.textSecondary} />
+              <Text style={[styles.locationBtnText, !scheduledFor && styles.placeholder]}>
+                {scheduledFor ? format(scheduledFor, "EEE d MMM, h:mm a") : 'Choose date & time'}
+              </Text>
+              <Ionicons name="chevron-forward" size={18} color={Colors.textSecondary} />
+            </Pressable>
+          )}
         </View>
 
         {/* Insurance */}
@@ -544,36 +670,43 @@ export default function SendPackageScreen() {
         </Pressable>
       </Modal>
 
-      <Modal visible={showWeightModal} animationType="slide" transparent onRequestClose={() => setShowWeightModal(false)}>
-        <Pressable style={styles.pkgOverlay} onPress={() => setShowWeightModal(false)}>
-          <View style={styles.pkgSheet}>
-            <View style={styles.pkgHeader}>
-              <Pressable onPress={() => setShowWeightModal(false)}>
-                <Ionicons name="chevron-back" size={24} color={Colors.textPrimary} />
-              </Pressable>
-              <Text style={styles.pkgTitle}>Estimated Weight</Text>
-              <View style={{ width: 24 }} />
-            </View>
+      {/* Android: native dialogs, date then time, auto-dismiss and chain */}
+      {Platform.OS === 'android' && androidPickerStep && (
+        <DateTimePicker
+          value={tempScheduleDate}
+          mode={androidPickerStep}
+          display="default"
+          minimumDate={new Date()}
+          onChange={handleAndroidPickerChange}
+        />
+      )}
 
-            {WEIGHT_TIERS.map((tier) => (
-              <Pressable
-                key={tier.id}
-                style={styles.pkgOption}
-                onPress={() => {
-                  setWeightTier(tier);
-                  setShowWeightModal(false);
-                }}
-              >
-                <View style={styles.pkgOptionLeft}>
-                  <Ionicons name="scale-outline" size={22} color={Colors.textPrimary} />
-                  <Text style={styles.pkgOptionText}>{tier.label}</Text>
-                </View>
-                {weightTier?.id === tier.id && <Ionicons name="checkmark-circle" size={22} color={Colors.primary} />}
+      {/* iOS: inline spinner in a sheet with an explicit Done button */}
+      <Modal visible={showIOSPicker} transparent animationType="slide" onRequestClose={() => setShowIOSPicker(false)}>
+        <Pressable style={styles.pkgOverlay} onPress={() => setShowIOSPicker(false)}>
+          <Pressable style={styles.pkgSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.pkgHeader}>
+              <Pressable onPress={() => setShowIOSPicker(false)}>
+                <Text style={styles.pickerCancelText}>Cancel</Text>
               </Pressable>
-            ))}
-          </View>
+              <Text style={styles.pkgTitle}>Schedule pickup</Text>
+              <Pressable onPress={confirmIOSSchedule}>
+                <Text style={styles.pickerDoneText}>Done</Text>
+              </Pressable>
+            </View>
+            {showIOSPicker && (
+              <DateTimePicker
+                value={tempScheduleDate}
+                mode="datetime"
+                display="spinner"
+                minimumDate={new Date()}
+                onChange={handleIOSPickerChange}
+              />
+            )}
+          </Pressable>
         </Pressable>
       </Modal>
+
     </SafeAreaView>
   );
 }
@@ -623,6 +756,39 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.border,
   },
+
+  weightInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: Colors.white,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  weightInput: {
+    flex: 1,
+    fontFamily: Fonts.poppins.regular,
+    fontSize: 14,
+    color: Colors.textPrimary,
+    padding: 0,
+  },
+  weightUnit: { fontFamily: Fonts.poppins.medium, fontSize: 13, color: Colors.textSecondary },
+  weightError: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: '#D64545', marginTop: 6 },
+
+  whenRow: { flexDirection: 'row', gap: 10 },
+  whenPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    borderWidth: 1, borderColor: Colors.border, borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 12,
+  },
+  whenPillActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  whenPillText: { fontFamily: Fonts.poppins.medium, fontSize: 13, color: Colors.textSecondary },
+  whenPillTextActive: { color: Colors.white },
+
+  pickerCancelText: { fontFamily: Fonts.poppins.regular, fontSize: 15, color: Colors.textSecondary },
+  pickerDoneText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.primary },
 
   insuranceRow: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 8 },
   checkbox: {

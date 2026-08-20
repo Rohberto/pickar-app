@@ -44,6 +44,10 @@ const decodePolyline = (encoded: string): { latitude: number; longitude: number 
   return poly;
 };
 
+// Same tinted color palette as before for brand feel, but no longer hides
+// POI icons, transit, or administrative (area/city) labels — those are
+// what make a map read as "rich" rather than flat, and hiding them was the
+// whole reason this map looked empty.
 const MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#e8f0ee' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#6b7280' }] },
@@ -52,9 +56,6 @@ const MAP_STYLE = [
   { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#e5e7eb' }] },
   { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#f3f4f6' }] },
   { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#b3d4cc' }] },
-  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
-  { featureType: 'administrative', elementType: 'geometry', stylers: [{ visibility: 'off' }] },
 ];
 
 type DeliveryStatus = 'ride_selected' | 'finding_driver' | 'no_driver_found' | 'driver_assigned' | 'driver_arrived' | 'in_transit';
@@ -345,6 +346,12 @@ export default function FindingDriverScreen() {
     }
   };
 
+  // Pulls the real driving route AND overwrites the crude
+  // haversine/flat-speed distance+ETA (set synchronously by the caller for
+  // instant feedback) with Google's actual road distance/duration once it
+  // lands — the polyline was already coming from here, but the number
+  // shown on screen was quietly staying the inaccurate placeholder forever
+  // since nothing ever fed the real figures back into driverDistance/eta.
   const fetchRoute = async (fromLat: number, fromLng: number, toLat: number, toLng: number) => {
     if (!GOOGLE_MAPS_KEY) return;
     try {
@@ -357,7 +364,10 @@ export default function FindingDriverScreen() {
       const res = await fetch(url);
       const data = await res.json();
       if (data.status === 'OK' && data.routes.length > 0) {
+        const leg = data.routes[0].legs[0];
         setRouteCoords(decodePolyline(data.routes[0].overview_polyline.points));
+        setDriverDistance((leg.distance.value / 1000).toFixed(1));
+        setEta(leg.duration.text);
       }
     } catch (err) {
       console.error('[FindingDriver] fetchRoute error:', err);
@@ -612,6 +622,44 @@ export default function FindingDriverScreen() {
         },
       },
     ]);
+  };
+
+  // "Change location" only shows up once we're already searching, which
+  // means payment already went through — so this can't just pop back a
+  // screen like it can before payment. Reuse the existing cancel flow
+  // (which already handles the refund) and send the user back to start a
+  // fresh booking with a new pickup point.
+  const handleChangePickupLocation = () => {
+    Alert.alert(
+      'Change pickup location',
+      'This cancels your current search and refunds any payment made, so you can start over with a new pickup location.',
+      [
+        { text: 'Keep searching', style: 'cancel' },
+        {
+          text: 'Cancel & Change',
+          style: 'destructive',
+          onPress: async () => {
+            try { await api.post(`/deliveries/${deliveryId}/cancel`); } catch (_) {}
+            finally { router.replace('/user/send-package' as never); }
+          },
+        },
+      ]
+    );
+  };
+
+  // Backed by the real fareBreakdown the price was computed from — same
+  // fields pricingService.js produces at select-ride time.
+  const handleShowFareBreakdown = () => {
+    const breakdown = (delivery as any)?.fareBreakdown as Record<string, number> | undefined;
+    if (!breakdown || Object.keys(breakdown).length === 0) {
+      Alert.alert('Amount', `Total: ${priceDisplay}`);
+      return;
+    }
+    const lines = Object.entries(breakdown)
+      .filter(([, value]) => value !== 0)
+      .map(([label, value]) => `${label}: ₦${value.toLocaleString()}`)
+      .join('\n');
+    Alert.alert('Fare Breakdown', `${lines}\n\nTotal: ${priceDisplay}`);
   };
 
   const handleCallDriver = () => {
@@ -882,7 +930,7 @@ export default function FindingDriverScreen() {
           </View>
         ) : isSearching ? (
           <>
-            <Text style={styles.chooseLabel}>Choose pick-up location</Text>
+            <Text style={styles.chooseLabel}>Looking for a driver near your pickup point...</Text>
             <View style={styles.addressRow}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.addressTitle}>{pickupLine1}</Text>
@@ -890,13 +938,13 @@ export default function FindingDriverScreen() {
                   {pickupLine2}{'  '}<Text style={styles.priceInline}>{priceDisplay}</Text>
                 </Text>
               </View>
-              <TouchableOpacity style={styles.changeLocRow}>
+              <TouchableOpacity style={styles.changeLocRow} onPress={handleChangePickupLocation}>
                 <Ionicons name="location-outline" size={13} color={Colors.textSecondary} />
                 <Text style={styles.changeLocText}>Change location</Text>
               </TouchableOpacity>
             </View>
-            <TouchableOpacity style={[styles.btn, styles.btnDisabled]} disabled activeOpacity={1}>
-              <Text style={styles.btnText}>Confirm Pick-Up Location</Text>
+            <TouchableOpacity style={[styles.btn, styles.btnCancel]} onPress={handleCancelTrip} activeOpacity={0.85}>
+              <Text style={styles.btnText}>Cancel Trip</Text>
             </TouchableOpacity>
           </>
         ) : (
@@ -917,10 +965,6 @@ export default function FindingDriverScreen() {
                   <Text style={styles.plateText}>{driver?.vehicle?.plateNumber ?? ''}</Text>
                 </Text>
               </View>
-              <TouchableOpacity style={styles.profileBtn}>
-                <Ionicons name="person-outline" size={13} color={Colors.textSecondary} />
-                <Text style={styles.profileBtnText}>View Driver's Profile</Text>
-              </TouchableOpacity>
             </View>
 
             <View style={styles.actionRow}>
@@ -998,24 +1042,23 @@ export default function FindingDriverScreen() {
               </TouchableOpacity>
             </View>
             <View style={styles.divider} />
+            {/* No "Change" affordance on either address here — by the time
+                Trip Details is reachable a driver is already assigned (or
+                being searched for) and payment's gone through, so editing
+                pickup/destination isn't something that can safely happen
+                from this screen. See "Change location" above instead,
+                which properly cancels + refunds first. */}
             <View style={styles.tripRouteRow}>
               <View style={styles.redDot} />
               <Text style={styles.tripRouteText} numberOfLines={1}>{delivery?.pickupAddress?.label ?? ''}</Text>
-              <TouchableOpacity style={styles.changeBtn}>
-                <Ionicons name="calendar-outline" size={14} color={Colors.textSecondary} />
-                <Text style={styles.changeBtnText}>Change</Text>
-              </TouchableOpacity>
             </View>
             <View style={styles.routeConnector} />
             <View style={styles.tripRouteRow}>
               <Ionicons name="location" size={14} color={Colors.textPrimary} />
               <Text style={[styles.tripRouteText, { marginLeft: 6 }]} numberOfLines={1}>{delivery?.recipient?.address?.label ?? ''}</Text>
-              <TouchableOpacity>
-                <Ionicons name="create-outline" size={18} color={Colors.textSecondary} />
-              </TouchableOpacity>
             </View>
             <View style={styles.divider} />
-            <TouchableOpacity style={styles.sheetRow}>
+            <TouchableOpacity style={styles.sheetRow} onPress={handleShowFareBreakdown}>
               <Ionicons name="wallet-outline" size={18} color={Colors.textSecondary} />
               <Text style={styles.sheetRowLabel}>Amount</Text>
               <Text style={styles.sheetRowValue}>{priceDisplay}</Text>
@@ -1129,7 +1172,6 @@ const styles = StyleSheet.create({
   changeLocText: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginLeft: 3 },
 
   btn: { backgroundColor: Colors.primary, borderRadius: 14, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
-  btnDisabled: { opacity: 0.45 },
   btnCancel: { marginTop: 18 },
   btnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.white },
 
@@ -1140,8 +1182,6 @@ const styles = StyleSheet.create({
   driverName: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.textPrimary },
   driverVehicleText: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginTop: 1 },
   plateText: { fontFamily: Fonts.poppins.medium, color: Colors.textPrimary },
-  profileBtn: { flexDirection: 'row', alignItems: 'center' },
-  profileBtnText: { fontFamily: Fonts.poppins.regular, fontSize: 11, color: Colors.textSecondary, marginLeft: 3 },
 
   actionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
   chatBtn: {
@@ -1185,8 +1225,6 @@ const styles = StyleSheet.create({
   redDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: Colors.primary },
   tripRouteText: { fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textPrimary, flex: 1 },
   routeConnector: { width: 1.5, height: 16, backgroundColor: Colors.border, marginLeft: 5 },
-  changeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  changeBtnText: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary },
   sheetRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
   sheetRowLabel: { fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textPrimary, flex: 1 },
   sheetRowValue: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: Colors.textPrimary },

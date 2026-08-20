@@ -1,14 +1,17 @@
 import RatingModal from '@/components/RatingModal';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
+import api from '@/services/api';
+import { downloadReceipt } from '@/utils/receipt';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   Animated,
   Image,
   Platform,
-  Share,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -30,14 +33,28 @@ export default function UserDeliveryCompleteScreen() {
   const driverVehicle = params.driverVehicle as string;
   const driverPlate = params.driverPlate as string;
 
-  const [rating, setRating] = useState(0);
-  const [rated, setRated] = useState(false);
+  // Extra detail (fare breakdown, distance, weight...) isn't passed as a
+  // route param — fetched once on mount purely to make the receipt PDF
+  // more complete. The screen renders fine from params alone if this
+  // fails or is slow, so it's best-effort and never blocks the UI.
+  const [deliveryDetail, setDeliveryDetail] = useState<any>(null);
+
+  useEffect(() => {
+    if (!deliveryId) return;
+    api.get(`/deliveries/${deliveryId}/status`)
+      .then(({ data }) => { if (data?.success) setDeliveryDetail(data.data); })
+      .catch(() => {});
+  }, [deliveryId]);
+
+  const [showRating, setShowRating] = useState(true);
+  const [ratedConfirmed, setRatedConfirmed] = useState(false);
+  const [ratingSkipped, setRatingSkipped] = useState(false);
   const [showReceipt, setShowReceipt] = useState(false);
+  const [downloadingReceipt, setDownloadingReceipt] = useState(false);
 
   const receiptAnim = useRef(new Animated.Value(500)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
   const checkAnim = useRef(new Animated.Value(0)).current;
-const [showRating, setShowRating] = useState(true);
 
 
   // Animate checkmark on mount
@@ -69,28 +86,30 @@ const [showRating, setShowRating] = useState(true);
     ]).start(() => setShowReceipt(false));
   };
 
-  const handleShareReceipt = async () => {
+  const handleDownloadReceipt = async () => {
+    setDownloadingReceipt(true);
     try {
-      await Share.share({
-        title: 'Pickar Delivery Receipt',
-        message:
-          `Pickar Delivery Receipt\n\n` +
-          `From: ${pickupLabel}\n` +
-          `To: ${destLabel}\n` +
-          `Recipient: ${recipientName}\n` +
-          `Amount: ${priceDisplay}\n\n` +
-          `Delivered by ${driverName}`,
+      await downloadReceipt({
+        deliveryId,
+        date: deliveryDetail?.timeline?.deliveredAt || deliveryDetail?.updatedAt,
+        price: deliveryDetail?.price ?? price,
+        pickupLabel: deliveryDetail?.pickupAddress?.label || pickupLabel,
+        destLabel: deliveryDetail?.recipient?.address?.label || destLabel,
+        recipientName: deliveryDetail?.recipient?.name || recipientName,
+        driverName: deliveryDetail?.driver?.name || driverName,
+        driverVehicle: deliveryDetail?.driver?.vehicle?.type || driverVehicle,
+        driverPlate: deliveryDetail?.driver?.vehicle?.plateNumber || driverPlate,
+        distanceKm: deliveryDetail?.distanceKm,
+        weightKg: deliveryDetail?.weightKg,
+        packageType: deliveryDetail?.packageType,
+        rideType: deliveryDetail?.rideType,
+        fareBreakdown: deliveryDetail?.fareBreakdown,
       });
-    } catch (_) {}
-  };
-
-  const handleRate = (stars: number) => {
-    setRating(stars);
-  };
-
-  const handleSubmitRating = () => {
-    // TODO: POST /deliveries/:id/rate with rating
-    setRated(true);
+    } catch (err) {
+      Alert.alert('Could not generate receipt', 'Please try again in a moment.');
+    } finally {
+      setDownloadingReceipt(false);
+    }
   };
 
   const handleGoHome = () => {
@@ -160,42 +179,37 @@ const [showRating, setShowRating] = useState(true);
           </View>
         </View>
 
-        {/* Rating */}
-        {!rated ? (
-          <View style={styles.ratingCard}>
-            <Text style={styles.ratingTitle}>How was your delivery?</Text>
-            <Text style={styles.ratingSubtitle}>Rate your experience with {driverName.split(' ')[0]}</Text>
-
-            <View style={styles.starsRow}>
-              {[1, 2, 3, 4, 5].map((star) => (
-                <TouchableOpacity key={star} onPress={() => handleRate(star)} activeOpacity={0.7}>
-                  <Ionicons
-                    name={star <= rating ? 'star' : 'star-outline'}
-                    size={34}
-                    color={star <= rating ? '#F59E0B' : Colors.border}
-                    style={{ marginHorizontal: 4 }}
-                  />
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {rating > 0 && (
-              <TouchableOpacity style={styles.submitRatingBtn} onPress={handleSubmitRating} activeOpacity={0.85}>
-                <Text style={styles.submitRatingText}>Submit Rating</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        ) : (
+        {/* Rating — the actual rating UI lives in RatingModal below, which
+            pops up automatically on mount. This card only reflects the
+            outcome once the modal is dismissed: a thank-you if they rated,
+            or a way back in if they skipped. Nothing renders here while
+            the modal is still open, so there's no duplicate rating UI
+            visible underneath it. */}
+        {ratedConfirmed ? (
           <View style={styles.ratedBadge}>
             <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />
             <Text style={styles.ratedText}>Thanks for your feedback!</Text>
           </View>
-        )}
+        ) : ratingSkipped ? (
+          <TouchableOpacity
+            style={styles.rateAgainCard}
+            onPress={() => { setRatingSkipped(false); setShowRating(true); }}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="star-outline" size={18} color={Colors.textSecondary} />
+            <Text style={styles.rateAgainText}>Rate your driver</Text>
+            <Ionicons name="chevron-forward" size={16} color={Colors.textSecondary} />
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* Footer buttons */}
       <View style={styles.footer}>
-        <TouchableOpacity style={styles.receiptBtn} onPress={openReceipt} activeOpacity={0.85}>
+        <TouchableOpacity
+          style={[styles.receiptBtn, downloadingReceipt && { opacity: 0.7 }]}
+          onPress={openReceipt}
+          activeOpacity={0.85}
+        >
           <Ionicons name="receipt-outline" size={18} color={Colors.white} style={{ marginRight: 8 }} />
           <Text style={styles.receiptBtnText}>Get Receipt</Text>
         </TouchableOpacity>
@@ -226,22 +240,22 @@ const [showRating, setShowRating] = useState(true);
 
           <View style={styles.divider} />
 
-          <TouchableOpacity style={styles.receiptOption} onPress={handleShareReceipt}>
+          <TouchableOpacity
+            style={styles.receiptOption}
+            onPress={handleDownloadReceipt}
+            disabled={downloadingReceipt}
+            activeOpacity={0.7}
+          >
             <View style={styles.receiptOptionIcon}>
-              <Ionicons name="arrow-down-outline" size={20} color={Colors.textPrimary} />
+              {downloadingReceipt
+                ? <ActivityIndicator size="small" color={Colors.textPrimary} />
+                : <Ionicons name="arrow-down-outline" size={20} color={Colors.textPrimary} />
+              }
             </View>
-            <Text style={styles.receiptOptionText}>Download receipt</Text>
+            <Text style={styles.receiptOptionText}>
+              {downloadingReceipt ? 'Preparing receipt...' : 'Download receipt'}
+            </Text>
           </TouchableOpacity>
-
-          <View style={styles.divider} />
-
-          <TouchableOpacity style={styles.receiptOption}>
-            <View style={styles.receiptOptionIcon}>
-              <Ionicons name="mail-outline" size={20} color={Colors.textPrimary} />
-            </View>
-            <Text style={styles.receiptOptionText}>Send receipt to email</Text>
-          </TouchableOpacity>
-
 
         </Animated.View>
       )}
@@ -249,7 +263,11 @@ const [showRating, setShowRating] = useState(true);
         visible={showRating}
         deliveryId={deliveryId}
         driverName={driverName}
-        onDone={() => setShowRating(false)}
+        onDone={(rated) => {
+          setShowRating(false);
+          if (rated) setRatedConfirmed(true);
+          else setRatingSkipped(true);
+        }}
       />
     </SafeAreaView>
   );
@@ -310,32 +328,20 @@ const styles = StyleSheet.create({
   amountLabel: { fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textSecondary, flex: 1 },
   amountValue: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.textPrimary },
 
-  ratingCard: {
-    width: '100%', alignItems: 'center',
-    backgroundColor: Colors.lightGray, borderRadius: 16,
-    paddingHorizontal: 20, paddingVertical: 20, marginBottom: 16,
-  },
-  ratingTitle: {
-    fontFamily: Fonts.poppins.semiBold, fontSize: 16,
-    color: Colors.textPrimary, marginBottom: 4,
-  },
-  ratingSubtitle: {
-    fontFamily: Fonts.poppins.regular, fontSize: 13,
-    color: Colors.textSecondary, marginBottom: 16,
-  },
-  starsRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
-  submitRatingBtn: {
-    backgroundColor: Colors.primary, borderRadius: 12,
-    paddingHorizontal: 32, paddingVertical: 12,
-  },
-  submitRatingText: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: Colors.white },
-
   ratedBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: `${Colors.primary}12`, borderRadius: 12,
     paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16,
+    width: '100%', justifyContent: 'center',
   },
   ratedText: { fontFamily: Fonts.poppins.medium, fontSize: 14, color: Colors.primary },
+
+  rateAgainCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    width: '100%', backgroundColor: Colors.lightGray, borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 14, marginBottom: 16,
+  },
+  rateAgainText: { flex: 1, fontFamily: Fonts.poppins.medium, fontSize: 14, color: Colors.textPrimary },
 
   footer: {
     paddingHorizontal: 24, paddingBottom: Platform.OS === 'ios' ? 12 : 24,

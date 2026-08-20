@@ -1,8 +1,10 @@
+import LiveLocationMarker from '@/components/map/LiveLocationMarker';
 import VehicleSetupModal from '@/components/VehicleSetupModal';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
 import api from '@/services/api';
+import { storage } from '@/utils/storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -13,7 +15,9 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
   Image,
+  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
@@ -22,13 +26,17 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { PROVIDER_GOOGLE } from 'react-native-maps';
 import { io, Socket } from 'socket.io-client';
 
 const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || 'http://localhost:3000';
 const CLOUDINARY_CLOUD = 'dtr1shkje';
 const CLOUDINARY_PRESET = 'pickar_profiles';
 
+// Kept the color palette but dropped the poi/transit visibility:'off'
+// overrides — those were hiding landmarks, shops, bus stops etc.
+// wholesale, which makes the map read as bare/broken next to a real
+// mapping app. Same fix already applied on the user-side maps.
 const MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#f3f4f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#6b7280' }] },
@@ -37,9 +45,16 @@ const MAP_STYLE = [
   { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#e5e7eb' }] },
   { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#f9fafb' }] },
   { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#dbeafe' }] },
-  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
 ];
+
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+// Only two meaningful stops here (unlike the user home sheet's three) —
+// there's no extra scrollable content to reveal by expanding further up,
+// just the fixed greeting/stats/CTA block. So: its normal resting height,
+// or dragged almost all the way down to uncover the map.
+const SHEET_OPEN   = SCREEN_HEIGHT * 0.52;
+const SHEET_CLOSED = SCREEN_HEIGHT - 90;
+const TAP_THRESHOLD_PX = 6;
 
 interface TripOffer {
   deliveryId: string;
@@ -71,6 +86,13 @@ interface IncomingRequest {
 // Module-level flag — survives remounts, prevents navigation loop
 let hasCheckedActiveTripOnce = false;
 
+// Persists the driver's last online/offline choice across app restarts.
+// The backend still flips a driver to 'offline' whenever their socket
+// disconnects (correct — a closed app truly can't receive trips), so this
+// preference is what lets us silently bring them back online on relaunch
+// instead of leaving them stuck offline until they flip the switch again.
+const DRIVER_ONLINE_PREF_KEY = 'driver_online_pref';
+
 export default function DriverHomeScreen() {
   const router = useRouter();
   const { user, setUser } = useAuth() as any;
@@ -89,10 +111,10 @@ export default function DriverHomeScreen() {
   const [profileLoading, setProfileLoading] = useState(true);
   const [vehicleInfo, setVehicleInfo] = useState<{ type: string; plateNumber: string } | null>(null);
   const [showVehicleSetup, setShowVehicleSetup] = useState(false);
+  const [homeSheetClosed, setHomeSheetClosed] = useState(false);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const socketRef = useRef<Socket | null>(null);
-  const locationWatchRef = useRef<Location.LocationSubscription | null>(null);
   const locationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mapRef = useRef<MapView>(null);
   const isOnlineRef = useRef(false);
@@ -101,6 +123,48 @@ export default function DriverHomeScreen() {
   const sheetAnim = useRef(new Animated.Value(700)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
   const isMountedRef = useRef(true);
+  const hasCenteredRef = useRef(false);
+
+  // ─── Draggable home sheet (greeting/stats/CTA) ─────────────────────
+  const homeSheetTop = useRef(new Animated.Value(SHEET_OPEN)).current;
+  const lastHomeSheetTop = useRef(SHEET_OPEN);
+
+  const snapHomeSheetTo = (destination: number) => {
+    lastHomeSheetTop.current = destination;
+    setHomeSheetClosed(destination === SHEET_CLOSED);
+    Animated.spring(homeSheetTop, {
+      toValue: destination,
+      useNativeDriver: false,
+      tension: 60,
+      friction: 12,
+    }).start();
+  };
+
+  const homeSheetPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, { dy }) => Math.abs(dy) > 5,
+      onPanResponderMove: (_, { dy }) => {
+        const next = lastHomeSheetTop.current + dy;
+        const clamped = Math.max(SHEET_OPEN, Math.min(SHEET_CLOSED, next));
+        homeSheetTop.setValue(clamped);
+      },
+      onPanResponderRelease: (_, { dy, vy }) => {
+        if (Math.abs(dy) < TAP_THRESHOLD_PX) {
+          const isClosed = lastHomeSheetTop.current === SHEET_CLOSED;
+          snapHomeSheetTo(isClosed ? SHEET_OPEN : SHEET_CLOSED);
+          return;
+        }
+        const current = lastHomeSheetTop.current + dy;
+        const projected = current + vy * 80;
+        const stops = [SHEET_OPEN, SHEET_CLOSED];
+        const destination = stops.reduce((closest, stop) =>
+          Math.abs(stop - projected) < Math.abs(closest - projected) ? stop : closest
+        );
+        snapHomeSheetTo(destination);
+      },
+    })
+  ).current;
 
   // ─── Pulse animation ──────────────────────────────────────────────
   useEffect(() => {
@@ -118,11 +182,9 @@ export default function DriverHomeScreen() {
   // ─── Mount ────────────────────────────────────────────────────────
   useEffect(() => {
     fetchDriverProfile();
-    requestLocation();
     return () => {
       isMountedRef.current = false;
       socketRef.current?.disconnect();
-      locationWatchRef.current?.remove();
       if (locationIntervalRef.current) clearInterval(locationIntervalRef.current);
     };
   }, []);
@@ -147,11 +209,19 @@ export default function DriverHomeScreen() {
       const { data } = await api.get('/drivers/me');
       if (data.success) {
         setDriverProfileId(data.data._id);
+        driverProfileIdRef.current = data.data._id;
         if (data.data.photo) setDriverPhoto(data.data.photo);
         const avg = data.data.rating?.average;
         setDriverRating(avg && avg > 0 ? String(avg.toFixed(1)) : '—');
-        if (data.data.vehicle?.type && data.data.vehicle?.plateNumber) {
-          setVehicleInfo(data.data.vehicle);
+        const hasVehicle = !!(data.data.vehicle?.type && data.data.vehicle?.plateNumber);
+        if (hasVehicle) setVehicleInfo(data.data.vehicle);
+
+        // Restore online status if the driver was online right before they
+        // closed the app — otherwise every relaunch silently drops them
+        // to offline even though nothing about their intent changed.
+        const wasOnline = await storage.get(DRIVER_ONLINE_PREF_KEY);
+        if (wasOnline && hasVehicle) {
+          goOnlineNow(data.data._id);
         }
       }
     } catch (err) {
@@ -233,25 +303,30 @@ export default function DriverHomeScreen() {
   };
 
   // ─── Location ─────────────────────────────────────────────────────
-  const requestLocation = async () => {
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') return;
-    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-    const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
+  // Position + heading are now owned by <LiveLocationMarker> (the same
+  // reactive, compass-driven "blue dot" used on the user home map) — its
+  // onLocationChange callback below is the only thing driving
+  // driverLocation now. This file just centers the map on the first fix
+  // and, while online, emits that live position to the backend on a
+  // timer so match-making sees fresh coordinates.
+  const handleLiveLocationChange = (coords: { latitude: number; longitude: number }) => {
     setDriverLocation(coords);
-    mapRef.current?.animateToRegion({ ...coords, latitudeDelta: 0.02, longitudeDelta: 0.02 }, 800);
+    if (!hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      mapRef.current?.animateToRegion({ ...coords, latitudeDelta: 0.02, longitudeDelta: 0.02 }, 800);
+    }
   };
 
-  const startLocationTracking = async () => {
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') return;
-    locationWatchRef.current = await Location.watchPositionAsync(
-      { accuracy: Location.Accuracy.High, distanceInterval: 10 },
-      (loc) => {
-        const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
-        setDriverLocation(coords);
-      }
+  // ─── Recenter button — snaps the map back to the live GPS dot ──
+  const handleRecenter = () => {
+    if (!driverLocation) return;
+    mapRef.current?.animateToRegion(
+      { ...driverLocation, latitudeDelta: 0.02, longitudeDelta: 0.02 },
+      500
     );
+  };
+
+  const startLocationTracking = () => {
     locationIntervalRef.current = setInterval(() => {
       const id = driverProfileIdRef.current;
       const loc = driverLocationRef.current;
@@ -266,8 +341,6 @@ export default function DriverHomeScreen() {
   };
 
   const stopLocationTracking = () => {
-    locationWatchRef.current?.remove();
-    locationWatchRef.current = null;
     if (locationIntervalRef.current) {
       clearInterval(locationIntervalRef.current);
       locationIntervalRef.current = null;
@@ -316,13 +389,17 @@ export default function DriverHomeScreen() {
   };
 
   // ─── Go online logic (extracted so it can be called without depending on vehicleInfo state) ──
-  const goOnlineNow = async () => {
+  // Accepts an explicit driverId so it can be called from fetchDriverProfile
+  // (on app launch, to restore prior online status) before driverProfileId
+  // state has actually committed.
+  const goOnlineNow = async (idOverride?: string) => {
+    const id = idOverride ?? driverProfileId;
     setIsOnline(true);
     isOnlineRef.current = true;
     try {
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
       socketRef.current?.emit('driver_online', {
-        driverId: driverProfileId,
+        driverId: id,
         lat: loc.coords.latitude,
         lng: loc.coords.longitude,
       });
@@ -345,12 +422,14 @@ export default function DriverHomeScreen() {
     }
     if (value) {
       await goOnlineNow();
+      storage.set(DRIVER_ONLINE_PREF_KEY, true);
     } else {
       setIsOnline(false);
       isOnlineRef.current = false;
       socketRef.current?.emit('driver_offline', { driverId: driverProfileId });
       api.post('/drivers/offline').catch(() => {});
       stopLocationTracking();
+      storage.set(DRIVER_ONLINE_PREF_KEY, false);
     }
   };
 
@@ -481,16 +560,7 @@ export default function DriverHomeScreen() {
           longitudeDelta: 0.02,
         }}
       >
-        {driverLocation && (
-          <Marker coordinate={driverLocation} anchor={{ x: 0.5, y: 1 }} tracksViewChanges={false}>
-            <View style={styles.pinContainer}>
-              <View style={styles.pinBody}>
-                <View style={styles.pinDot} />
-              </View>
-              <View style={styles.pinShadow} />
-            </View>
-          </Marker>
-        )}
+        <LiveLocationMarker onLocationChange={handleLiveLocationChange} />
       </MapView>
 
       {/* ── FLOATING HEADER ─────────────────────────────────────── */}
@@ -541,15 +611,42 @@ export default function DriverHomeScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* ── GRADIENT BOTTOM SHEET ───────────────────────────────── */}
-      <View style={styles.bottomSheet}>
+      {/* ── RECENTER FAB — snaps the map back to current location ── */}
+      <TouchableOpacity
+        style={styles.recenterFab}
+        activeOpacity={0.85}
+        onPress={handleRecenter}
+        hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+      >
+        <Ionicons name="locate" size={20} color={Colors.primary} />
+      </TouchableOpacity>
+
+      {/* ── REOPEN FAB — shown once the sheet is dragged fully closed ── */}
+      {homeSheetClosed && (
+        <TouchableOpacity
+          style={styles.reopenFab}
+          activeOpacity={0.85}
+          onPress={() => snapHomeSheetTo(SHEET_OPEN)}
+          hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
+        >
+          <Ionicons name="chevron-up" size={24} color={Colors.primary} />
+        </TouchableOpacity>
+      )}
+
+      {/* ── GRADIENT BOTTOM SHEET — draggable, same pattern as user home ── */}
+      <Animated.View
+        style={[styles.bottomSheet, { top: homeSheetTop }]}
+        pointerEvents={homeSheetClosed ? 'none' : 'auto'}
+      >
         <LinearGradient
           colors={['#9B1515', '#3D0707']}
           style={StyleSheet.absoluteFillObject}
           start={{ x: 0.2, y: 0 }}
           end={{ x: 0.8, y: 1 }}
         />
-        <View style={styles.dragHandle} />
+        <View {...homeSheetPanResponder.panHandlers} style={styles.dragHandleArea}>
+          <View style={styles.dragHandle} />
+        </View>
 
         <View style={styles.greetingRow}>
           <View>
@@ -600,7 +697,7 @@ export default function DriverHomeScreen() {
             <Text style={styles.goOnlineBtnText}>Go Online & Find Rides</Text>
           </TouchableOpacity>
         )}
-      </View>
+      </Animated.View>
 
       {incomingRequest && (
         <Animated.View
@@ -708,6 +805,7 @@ export default function DriverHomeScreen() {
           setVehicleInfo(vehicle);   // saves for future toggles
           setShowVehicleSetup(false);
           goOnlineNow();             // go online directly, no state dependency
+          storage.set(DRIVER_ONLINE_PREF_KEY, true);
         }}
       />
     </View>
@@ -717,24 +815,30 @@ export default function DriverHomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f3f4f6' },
 
-  pinContainer: { alignItems: 'center' },
-  pinBody: {
-    width: 28, height: 28, borderRadius: 14,
-    backgroundColor: Colors.primary,
-    borderWidth: 3, borderColor: '#fff',
+  reopenFab: {
+    position: 'absolute',
+    alignSelf: 'center',
+    bottom: 28,
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: '#fff',
     alignItems: 'center', justifyContent: 'center',
-    borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
-    transform: [{ rotate: '45deg' }],
-    shadowColor: Colors.primary, shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4, shadowRadius: 6, elevation: 6,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2, shadowRadius: 8, elevation: 8,
+    zIndex: 9,
   },
-  pinDot: {
-    width: 8, height: 8, borderRadius: 4,
-    backgroundColor: '#fff', transform: [{ rotate: '-45deg' }],
-  },
-  pinShadow: {
-    width: 12, height: 5, borderRadius: 6,
-    backgroundColor: 'rgba(134,19,19,0.25)', marginTop: 1,
+
+  // Sits just above the sheet's default (open) resting position, same
+  // idea as the user home screen's recenter button.
+  recenterFab: {
+    position: 'absolute',
+    right: 16,
+    bottom: SCREEN_HEIGHT - SHEET_OPEN + 16,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 6,
+    zIndex: 8,
   },
 
   header: {
@@ -782,11 +886,13 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     paddingHorizontal: 20,
     paddingBottom: Platform.OS === 'ios' ? 36 : 20,
-    paddingTop: 4,
+  },
+  dragHandleArea: {
+    alignItems: 'center', paddingTop: 12, paddingBottom: 6, paddingHorizontal: 60,
   },
   dragHandle: {
     width: 40, height: 4, backgroundColor: 'rgba(255,255,255,0.3)',
-    borderRadius: 2, alignSelf: 'center', marginBottom: 18,
+    borderRadius: 2,
   },
   greetingRow: {
     flexDirection: 'row', alignItems: 'center',

@@ -4,7 +4,7 @@ import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
 import api from '@/services/api';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -82,6 +82,41 @@ export default function HomeScreen() {
   const sheetTop = useRef(new Animated.Value(SHEET_COLLAPSED)).current;
   const lastSheetTop = useRef(SHEET_COLLAPSED);
 
+  // ─── Interstate "Coming Soon" card — animated truck ────────────
+  // Bounces gently on its "wheels" while two motion lines behind it
+  // pulse in and out to read as movement, not a static icon.
+  const truckBounceAnim = useRef(new Animated.Value(0)).current;
+  const truckLinesAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const bounceLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(truckBounceAnim, { toValue: 1, duration: 650, useNativeDriver: true }),
+        Animated.timing(truckBounceAnim, { toValue: 0, duration: 650, useNativeDriver: true }),
+      ])
+    );
+    const linesLoop = Animated.loop(
+      Animated.timing(truckLinesAnim, { toValue: 1, duration: 900, useNativeDriver: true })
+    );
+    bounceLoop.start();
+    linesLoop.start();
+    return () => {
+      bounceLoop.stop();
+      linesLoop.stop();
+    };
+  }, []);
+  const truckBounceTranslate = truckBounceAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -6],
+  });
+  const truckLinesOpacity = truckLinesAnim.interpolate({
+    inputRange: [0, 0.15, 0.85, 1],
+    outputRange: [0, 1, 1, 0],
+  });
+  const truckLinesTranslate = truckLinesAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [10, -4],
+  });
+
   const sheetOpacity = sheetTop.interpolate({
     inputRange: [SHEET_COLLAPSED, SHEET_CLOSED],
     outputRange: [1, 0],
@@ -143,6 +178,15 @@ export default function HomeScreen() {
       );
     }
   }, [mapReady, userLocation]);
+
+  // ─── Recenter button — snaps the map back to the live GPS dot ──
+  const handleRecenter = () => {
+    if (!userLocation) return;
+    mapRef.current?.animateToRegion(
+      { ...userLocation, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+      500
+    );
+  };
 
   // ─── Fetch profile + wallet on mount ─────────────────────────
   useEffect(() => {
@@ -297,6 +341,7 @@ export default function HomeScreen() {
     activeDelivery?.status === 'in_transit'       ? 'Package on the way to recipient'
     : activeDelivery?.status === 'driver_arrived'  ? 'Driver is at your pickup location'
     : activeDelivery?.status === 'driver_assigned' ? 'Driver is heading to you'
+    : activeDelivery?.status === 'scheduled'       ? 'Scheduled — tap for details'
     : 'Finding a driver...';
 
   const isStuckDelivery =
@@ -348,6 +393,16 @@ export default function HomeScreen() {
           <View style={styles.notifDot} />
         </TouchableOpacity>
       </View>
+
+      {/* ── RECENTER FAB — snaps the map back to current location ── */}
+      <TouchableOpacity
+        style={styles.recenterFab}
+        activeOpacity={0.85}
+        onPress={handleRecenter}
+        hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+      >
+        <Ionicons name="locate" size={20} color={Colors.primary} />
+      </TouchableOpacity>
 
       {/* ── REOPEN FAB (replaces the old tiny drag-handle target) ── */}
       {sheetClosed && (
@@ -416,11 +471,13 @@ export default function HomeScreen() {
               style={[styles.activeBanner, isStuckDelivery && styles.activeBannerStuck]}
               onPress={() =>
                 router.push({
-                  pathname: '/user/finding-driver',
+                  pathname: activeDelivery.status === 'scheduled'
+                    ? '/user/scheduled-delivery'
+                    : '/user/finding-driver',
                   params: { deliveryId: activeDelivery._id },
                 } as never)
               }
-              onLongPress={handleLongPressDelivery}
+              onLongPress={activeDelivery.status === 'scheduled' ? undefined : handleLongPressDelivery}
               delayLongPress={600}
               activeOpacity={0.85}
             >
@@ -435,7 +492,9 @@ export default function HomeScreen() {
                 </View>
               )}
               <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.activeBannerTitle}>Delivery in progress</Text>
+                <Text style={styles.activeBannerTitle}>
+                  {activeDelivery.status === 'scheduled' ? 'Scheduled delivery' : 'Delivery in progress'}
+                </Text>
                 <Text style={styles.activeBannerSub}>{activeStatusText}</Text>
                 {/* Hint shown only when stuck */}
                 {isStuckDelivery && !cancellingDelivery && (
@@ -505,7 +564,24 @@ export default function HomeScreen() {
                 <Text style={styles.comingSoonBadgeFloatText}>Soon</Text>
               </View>
               <View style={styles.serviceImgContainer}>
-                <Ionicons name="car-outline" size={56} color="rgba(255,255,255,0.55)" />
+                <View style={styles.truckAnimWrap}>
+                  <Animated.View
+                    style={[
+                      styles.truckMotionLines,
+                      {
+                        opacity: truckLinesOpacity,
+                        transform: [{ translateX: truckLinesTranslate }],
+                      },
+                    ]}
+                  >
+                    <View style={[styles.truckLine, { width: 16 }]} />
+                    <View style={[styles.truckLine, { width: 11 }]} />
+                    <View style={[styles.truckLine, { width: 6 }]} />
+                  </Animated.View>
+                  <Animated.View style={{ transform: [{ translateY: truckBounceTranslate }] }}>
+                    <MaterialCommunityIcons name="truck-fast-outline" size={54} color="#fff" style={{ opacity: 0.92 }} />
+                  </Animated.View>
+                </View>
               </View>
               <Text style={[styles.serviceLabel, styles.serviceLabelDisabled]}>Interstate delivery</Text>
             </View>
@@ -597,6 +673,21 @@ const styles = StyleSheet.create({
     zIndex: 9,
   },
 
+  // Sits just above the sheet's default (collapsed) resting position so
+  // it's always reachable without fighting the sheet for space, the same
+  // way a real maps app keeps its locate-me button clear of sheets/cards.
+  recenterFab: {
+    position: 'absolute',
+    right: 16,
+    bottom: SCREEN_HEIGHT - SHEET_COLLAPSED + 16,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 6,
+    zIndex: 8,
+  },
+
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 18 },
   avatarContainer: { width: 52, height: 52, marginRight: 14, position: 'relative' },
   avatarPressable: {
@@ -682,6 +773,12 @@ const styles = StyleSheet.create({
     paddingTop: 16, paddingHorizontal: 12,
   },
   serviceImg: { width: '100%', height: '100%' },
+  truckAnimWrap: { alignItems: 'center', justifyContent: 'center' },
+  truckMotionLines: {
+    position: 'absolute', left: -18, top: '50%', marginTop: -9,
+    alignItems: 'flex-end', gap: 4,
+  },
+  truckLine: { height: 2.5, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.55)' },
   serviceLabel: {
     fontFamily: Fonts.poppins.medium, fontSize: 13,
     color: '#fff', textAlign: 'center', paddingHorizontal: 10, marginTop: 6,

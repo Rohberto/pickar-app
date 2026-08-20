@@ -1,5 +1,6 @@
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
+import { DRIVER_RIDE_TYPES, RideTypeKey } from '@/constants/rideTypes';
 import { useAuth } from '@/hooks/useAuth';
 import api from '@/services/api';
 import { Ionicons } from '@expo/vector-icons';
@@ -33,6 +34,7 @@ interface DriverProfile {
   photo?: string;
   rating?: { average: number; count: number };
   vehicle?: { type: 'bike' | 'truck'; plateNumber: string };
+  rideType?: RideTypeKey | null;
   status: string;
   nationality?: string;
   stateOfOrigin?: string;
@@ -111,7 +113,7 @@ export default function DriverAccountScreen() {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [plateNumber, setPlateNumber] = useState('');
-  const [vehicleType, setVehicleType] = useState<'bike' | 'truck'>('bike');
+  const [selectedRideType, setSelectedRideType] = useState<RideTypeKey | null>(null);
   const [nameFocused, setNameFocused] = useState(false);
   const [plateFocused, setPlateFocused] = useState(false);
 
@@ -137,7 +139,7 @@ export default function DriverAccountScreen() {
         setName(d.name || '');
         setPhone(d.phone || '');
         setPlateNumber(d.vehicle?.plateNumber || '');
-        setVehicleType(d.vehicle?.type || 'bike');
+        setSelectedRideType(d.rideType || null);
         setNationality(d.nationality || '');
         setStateOfOrigin(d.stateOfOrigin || '');
         setResidentialAddress(d.residentialAddress || '');
@@ -205,18 +207,29 @@ export default function DriverAccountScreen() {
   };
 
   // ─── Save vehicle ─────────────────────────────────────────────
+  // Ride type is only ever sent here on FIRST registration (driver.rideType
+  // not yet set) — once locked, this only ever updates the plate number.
+  // The backend enforces the lock too (driverController.updateMe), this is
+  // just keeping the app from even trying.
+  const isRideTypeLocked = !!driver?.rideType;
+
   const handleSaveVehicle = async () => {
     if (!plateNumber.trim()) {
       Alert.alert('Error', 'Please enter your plate number.');
       return;
     }
+    if (!isRideTypeLocked && !selectedRideType) {
+      Alert.alert('Error', 'Please choose a ride type.');
+      return;
+    }
     setSavingVehicle(true);
     try {
-      await api.patch('/drivers/me', {
-        vehicle: { type: vehicleType, plateNumber: plateNumber.trim().toUpperCase() },
-      });
+      const body: any = { plateNumber: plateNumber.trim().toUpperCase() };
+      if (!isRideTypeLocked) body.rideType = selectedRideType;
+
+      const { data } = await api.patch('/drivers/me', body);
       setDriver(prev =>
-        prev ? { ...prev, vehicle: { type: vehicleType, plateNumber: plateNumber.trim().toUpperCase() } } : prev
+        prev ? { ...prev, vehicle: data.data.vehicle, rideType: data.data.rideType } : prev
       );
       Alert.alert('Success', 'Vehicle details updated.');
     } catch (err: any) {
@@ -276,9 +289,9 @@ export default function DriverAccountScreen() {
   };
 
   const nameChanged = name.trim() !== (driver?.name || '').trim();
-  const vehicleChanged =
-    plateNumber.trim().toUpperCase() !== (driver?.vehicle?.plateNumber || '') ||
-    vehicleType !== (driver?.vehicle?.type || 'bike');
+  const vehicleChanged = isRideTypeLocked
+    ? plateNumber.trim().toUpperCase() !== (driver?.vehicle?.plateNumber || '')
+    : plateNumber.trim().length > 0 && !!selectedRideType;
   const detailsChanged =
     nationality.trim() !== (driver?.nationality || '').trim() ||
     stateOfOrigin.trim() !== (driver?.stateOfOrigin || '').trim() ||
@@ -576,106 +589,139 @@ export default function DriverAccountScreen() {
         {/* ══ VEHICLE TAB ════════════════════════════════════════ */}
         {activeTab === 'vehicle' && (
           <>
-            <Text style={styles.sectionTitle}>Registered Vehicle</Text>
-
-            <SectionCard>
-              {/* Vehicle type selector */}
-              <Text style={styles.fieldLabel}>Vehicle Type</Text>
-              <View style={styles.vehicleTypeRow}>
-                <TouchableOpacity
-                  style={[styles.vehicleTypeCard, vehicleType === 'bike' && styles.vehicleTypeCardActive]}
-                  onPress={() => setVehicleType('bike')}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons
-                    name="bicycle-outline"
-                    size={28}
-                    color={vehicleType === 'bike' ? Colors.primary : Colors.textSecondary}
-                  />
-                  <Text style={[styles.vehicleTypeLabel, vehicleType === 'bike' && styles.vehicleTypeLabelActive]}>
-                    Bike
-                  </Text>
-                  <Text style={styles.vehicleTypeDesc}>Packages & small deliveries</Text>
-                  {vehicleType === 'bike' && (
-                    <View style={styles.vehicleCheckBadge}>
-                      <Ionicons name="checkmark" size={11} color="#fff" />
-                    </View>
-                  )}
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.vehicleTypeCard, vehicleType === 'truck' && styles.vehicleTypeCardActive]}
-                  onPress={() => setVehicleType('truck')}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons
-                    name="car-outline"
-                    size={28}
-                    color={vehicleType === 'truck' ? Colors.primary : Colors.textSecondary}
-                  />
-                  <Text style={[styles.vehicleTypeLabel, vehicleType === 'truck' && styles.vehicleTypeLabelActive]}>
-                    Truck / Car
-                  </Text>
-                  <Text style={styles.vehicleTypeDesc}>House loads & large items</Text>
-                  {vehicleType === 'truck' && (
-                    <View style={styles.vehicleCheckBadge}>
-                      <Ionicons name="checkmark" size={11} color="#fff" />
-                    </View>
-                  )}
-                </TouchableOpacity>
-              </View>
-
-              <View style={styles.infoRowDivider} />
-
-              {/* Plate number */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.fieldLabel}>Plate Number</Text>
-                <View style={[styles.fieldInput, plateFocused && styles.fieldInputFocused]}>
-                  <Ionicons name="card-outline" size={17} color={Colors.textSecondary} style={{ marginRight: 10 }} />
-                  <TextInput
-                    style={[styles.fieldTextInput, { letterSpacing: 2 }]}
-                    value={plateNumber}
-                    onChangeText={t => setPlateNumber(t.toUpperCase())}
-                    onFocus={() => setPlateFocused(true)}
-                    onBlur={() => setPlateFocused(false)}
-                    placeholder="e.g. ABC 123 XY"
-                    placeholderTextColor={Colors.textSecondary}
-                    autoCapitalize="characters"
-                    maxLength={12}
-                  />
-                </View>
-              </View>
-            </SectionCard>
-
-            {vehicleChanged && (
-              <TouchableOpacity
-                style={styles.saveVehicleBtn}
-                onPress={handleSaveVehicle}
-                disabled={savingVehicle}
-                activeOpacity={0.85}
-              >
-                {savingVehicle
-                  ? <ActivityIndicator color="#fff" />
-                  : <Text style={styles.saveVehicleBtnText}>Save Vehicle Details</Text>
-                }
-              </TouchableOpacity>
-            )}
-
-            {driver?.vehicle?.plateNumber ? (
+            {isRideTypeLocked ? (
               <>
-                <Text style={styles.sectionTitle}>Current Registration</Text>
+                <Text style={styles.sectionTitle}>Your Ride Type</Text>
                 <SectionCard>
-                  <InfoRow label="Vehicle Type" value={driver.vehicle.type === 'bike' ? 'Motorcycle / Bike' : 'Truck / Car'} />
+                  <View style={styles.lockedRideTypeRow}>
+                    <Image
+                      source={DRIVER_RIDE_TYPES.find(r => r.type === driver!.rideType)?.icon}
+                      style={styles.lockedRideTypeIcon}
+                      resizeMode="contain"
+                    />
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <Text style={styles.lockedRideTypeLabel}>
+                        {DRIVER_RIDE_TYPES.find(r => r.type === driver!.rideType)?.label}
+                      </Text>
+                      <Text style={styles.lockedRideTypeDesc}>
+                        {DRIVER_RIDE_TYPES.find(r => r.type === driver!.rideType)?.description}
+                      </Text>
+                    </View>
+                    <View style={styles.lockedBadge}>
+                      <Ionicons name="lock-closed" size={11} color={Colors.textSecondary} />
+                      <Text style={styles.lockedBadgeText}>Locked</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.lockedNote}>
+                    Your ride type can't be changed once registered. Contact support if this needs to change.
+                  </Text>
+
                   <View style={styles.infoRowDivider} />
-                  <InfoRow label="Plate Number" value={driver.vehicle.plateNumber} />
+
+                  <View style={styles.fieldGroup}>
+                    <Text style={styles.fieldLabel}>Plate Number</Text>
+                    <View style={[styles.fieldInput, plateFocused && styles.fieldInputFocused]}>
+                      <Ionicons name="card-outline" size={17} color={Colors.textSecondary} style={{ marginRight: 10 }} />
+                      <TextInput
+                        style={[styles.fieldTextInput, { letterSpacing: 2 }]}
+                        value={plateNumber}
+                        onChangeText={t => setPlateNumber(t.toUpperCase())}
+                        onFocus={() => setPlateFocused(true)}
+                        onBlur={() => setPlateFocused(false)}
+                        placeholder="e.g. ABC 123 XY"
+                        placeholderTextColor={Colors.textSecondary}
+                        autoCapitalize="characters"
+                        maxLength={12}
+                      />
+                    </View>
+                  </View>
                 </SectionCard>
+
+                {vehicleChanged && (
+                  <TouchableOpacity
+                    style={styles.saveVehicleBtn}
+                    onPress={handleSaveVehicle}
+                    disabled={savingVehicle}
+                    activeOpacity={0.85}
+                  >
+                    {savingVehicle
+                      ? <ActivityIndicator color="#fff" />
+                      : <Text style={styles.saveVehicleBtnText}>Update Plate Number</Text>
+                    }
+                  </TouchableOpacity>
+                )}
               </>
             ) : (
-              <View style={styles.emptyState}>
-                <Ionicons name="car-outline" size={40} color={Colors.border} />
-                <Text style={styles.emptyStateText}>No vehicle registered yet</Text>
-                <Text style={styles.emptyStateSub}>Fill in the details above to register your vehicle</Text>
-              </View>
+              <>
+                <Text style={styles.sectionTitle}>Register Your Ride Type</Text>
+                <Text style={styles.sectionSub}>
+                  Choose the delivery type you'll drive for. This is permanent, so pick carefully.
+                </Text>
+
+                <SectionCard>
+                  <View style={{ gap: 10 }}>
+                    {DRIVER_RIDE_TYPES.map((opt) => (
+                      <TouchableOpacity
+                        key={opt.type}
+                        style={[styles.rideTypeRow, selectedRideType === opt.type && styles.rideTypeRowActive]}
+                        onPress={() => setSelectedRideType(opt.type)}
+                        activeOpacity={0.8}
+                      >
+                        <Image source={opt.icon} style={styles.lockedRideTypeIcon} resizeMode="contain" />
+                        <View style={{ flex: 1, marginLeft: 12 }}>
+                          <Text style={[styles.vehicleTypeLabel, selectedRideType === opt.type && styles.vehicleTypeLabelActive]}>
+                            {opt.label}
+                          </Text>
+                          <Text style={styles.vehicleTypeDesc}>{opt.description}</Text>
+                        </View>
+                        {selectedRideType === opt.type && (
+                          <Ionicons name="checkmark-circle" size={22} color={Colors.primary} />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  <View style={styles.infoRowDivider} />
+
+                  <View style={styles.fieldGroup}>
+                    <Text style={styles.fieldLabel}>Plate Number</Text>
+                    <View style={[styles.fieldInput, plateFocused && styles.fieldInputFocused]}>
+                      <Ionicons name="card-outline" size={17} color={Colors.textSecondary} style={{ marginRight: 10 }} />
+                      <TextInput
+                        style={[styles.fieldTextInput, { letterSpacing: 2 }]}
+                        value={plateNumber}
+                        onChangeText={t => setPlateNumber(t.toUpperCase())}
+                        onFocus={() => setPlateFocused(true)}
+                        onBlur={() => setPlateFocused(false)}
+                        placeholder="e.g. ABC 123 XY"
+                        placeholderTextColor={Colors.textSecondary}
+                        autoCapitalize="characters"
+                        maxLength={12}
+                      />
+                    </View>
+                  </View>
+                </SectionCard>
+
+                {vehicleChanged && (
+                  <TouchableOpacity
+                    style={styles.saveVehicleBtn}
+                    onPress={handleSaveVehicle}
+                    disabled={savingVehicle}
+                    activeOpacity={0.85}
+                  >
+                    {savingVehicle
+                      ? <ActivityIndicator color="#fff" />
+                      : <Text style={styles.saveVehicleBtnText}>Register Ride Type</Text>
+                    }
+                  </TouchableOpacity>
+                )}
+
+                <View style={styles.emptyState}>
+                  <Ionicons name="car-outline" size={40} color={Colors.border} />
+                  <Text style={styles.emptyStateText}>No vehicle registered yet</Text>
+                  <Text style={styles.emptyStateSub}>Choose a ride type above to get started</Text>
+                </View>
+              </>
             )}
           </>
         )}
@@ -1054,24 +1100,25 @@ const styles = StyleSheet.create({
   },
   inlineSaveBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 12, color: '#fff' },
 
-  // Vehicle type
-  vehicleTypeRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
-  vehicleTypeCard: {
-    flex: 1, borderRadius: 14, padding: 14,
-    borderWidth: 1.5, borderColor: Colors.border,
-    backgroundColor: Colors.white, alignItems: 'center', gap: 6,
-    position: 'relative',
+  // Ride type registration (locked after first save)
+  rideTypeRow: {
+    flexDirection: 'row', alignItems: 'center', borderRadius: 14, padding: 12,
+    borderWidth: 1.5, borderColor: Colors.border, backgroundColor: Colors.white,
   },
-  vehicleTypeCardActive: { borderColor: Colors.primary, backgroundColor: `${Colors.primary}08` },
+  rideTypeRowActive: { borderColor: Colors.primary, backgroundColor: `${Colors.primary}08` },
   vehicleTypeLabel: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: Colors.textSecondary },
   vehicleTypeLabelActive: { color: Colors.primary },
-  vehicleTypeDesc: { fontFamily: Fonts.poppins.regular, fontSize: 11, color: Colors.textSecondary, textAlign: 'center' },
-  vehicleCheckBadge: {
-    position: 'absolute', top: -6, right: -6,
-    width: 20, height: 20, borderRadius: 10,
-    backgroundColor: Colors.primary, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: Colors.white,
+  vehicleTypeDesc: { fontFamily: Fonts.poppins.regular, fontSize: 11, color: Colors.textSecondary },
+  lockedRideTypeRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  lockedRideTypeIcon: { width: 42, height: 42 },
+  lockedRideTypeLabel: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: Colors.textPrimary },
+  lockedRideTypeDesc: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
+  lockedBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: Colors.lightGray, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20,
   },
+  lockedBadgeText: { fontFamily: Fonts.poppins.medium, fontSize: 11, color: Colors.textSecondary },
+  lockedNote: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary, lineHeight: 18 },
   saveVehicleBtn: {
     backgroundColor: Colors.primary, borderRadius: 14,
     paddingVertical: 15, alignItems: 'center', marginBottom: 16,

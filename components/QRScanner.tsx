@@ -5,9 +5,12 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useEffect, useRef, useState } from 'react';
 import {
     Animated,
+    KeyboardAvoidingView,
     Modal,
+    Platform,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View
 } from 'react-native';
@@ -29,15 +32,26 @@ export default function QRScanner({
 }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
+  const [manualCode, setManualCode] = useState('');
   const scanLineAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (visible) {
       setScanned(false);
+      setManualMode(false);
+      setManualCode('');
       startScanAnimation();
       if (!permission?.granted) requestPermission();
     }
   }, [visible]);
+
+  const handleManualSubmit = () => {
+    const code = manualCode.trim();
+    if (!code || scanned) return;
+    setScanned(true);
+    onScanned(code);
+  };
 
   const startScanAnimation = () => {
     Animated.loop(
@@ -69,11 +83,42 @@ export default function QRScanner({
           <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
             <Ionicons name="close" size={22} color={Colors.textPrimary} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>{title}</Text>
-          <View style={{ width: 36 }} />
+          <Text style={styles.headerTitle}>{manualMode ? 'Enter Code' : title}</Text>
+          <TouchableOpacity
+            style={styles.closeBtn}
+            onPress={() => setManualMode((m) => !m)}
+          >
+            <Ionicons name={manualMode ? 'camera-outline' : 'keypad-outline'} size={20} color={Colors.textPrimary} />
+          </TouchableOpacity>
         </View>
 
-        {!permission?.granted ? (
+        {manualMode ? (
+          <KeyboardAvoidingView
+            style={styles.manualContainer}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            <Ionicons name="keypad-outline" size={44} color={Colors.primary} style={{ marginBottom: 16 }} />
+            <Text style={styles.manualTitle}>Enter code manually</Text>
+            <Text style={styles.manualSub}>Ask the customer for their delivery code and type it in below.</Text>
+            <TextInput
+              style={styles.manualInput}
+              placeholder="e.g. 4821"
+              placeholderTextColor={Colors.textSecondary}
+              keyboardType="number-pad"
+              maxLength={8}
+              value={manualCode}
+              onChangeText={setManualCode}
+              autoFocus
+            />
+            <TouchableOpacity
+              style={[styles.manualSubmitBtn, !manualCode.trim() && styles.manualSubmitBtnDisabled]}
+              onPress={handleManualSubmit}
+              disabled={!manualCode.trim()}
+            >
+              <Text style={styles.manualSubmitBtnText}>Confirm Code</Text>
+            </TouchableOpacity>
+          </KeyboardAvoidingView>
+        ) : !permission?.granted ? (
           <View style={styles.permissionBox}>
             <Ionicons name="camera-outline" size={52} color={Colors.border} />
             <Text style={styles.permissionTitle}>Camera Access Needed</Text>
@@ -180,6 +225,43 @@ const styles = StyleSheet.create({
   },
 
   cameraContainer: { flex: 1 },
+
+  manualContainer: {
+    flex: 1, backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 40,
+  },
+  manualTitle: {
+    fontFamily: Fonts.poppins.semiBold, fontSize: 18, color: Colors.textPrimary,
+    marginBottom: 6,
+  },
+  manualSub: {
+    fontFamily: Fonts.poppins.regular, fontSize: 13,
+    color: Colors.textSecondary, textAlign: 'center', marginBottom: 24,
+  },
+  manualInput: {
+    width: '100%',
+    backgroundColor: Colors.lightGray,
+    borderRadius: 14,
+    paddingVertical: 16,
+    fontFamily: Fonts.poppins.semiBold,
+    fontSize: 22,
+    letterSpacing: 4,
+    textAlign: 'center',
+    color: Colors.textPrimary,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: 20,
+  },
+  manualSubmitBtn: {
+    width: '100%',
+    backgroundColor: Colors.primary,
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  manualSubmitBtnDisabled: { backgroundColor: Colors.lightGray },
+  manualSubmitBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 15, color: '#fff' },
 
   overlay: { flex: 1 },
   overlayTop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)' },

@@ -19,7 +19,7 @@ interface Props {
   visible: boolean;
   deliveryId: string;
   driverName: string;
-  onDone: () => void;   // called after rating submitted OR skipped
+  onDone: (rated: boolean) => void;   // called after rating submitted (true) OR skipped (false)
 }
 
 const LABELS = ['', 'Poor', 'Fair', 'Good', 'Great', 'Excellent'];
@@ -40,7 +40,7 @@ export default function RatingModal({ visible, deliveryId, driverName, onDone }:
         rating: selected,
         comment: comment.trim(),
       });
-      onDone();
+      onDone(true);
     } catch (err: any) {
       Alert.alert('Error', err?.response?.data?.message || 'Could not submit rating. Try again.');
     } finally {
@@ -49,7 +49,7 @@ export default function RatingModal({ visible, deliveryId, driverName, onDone }:
   };
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onDone}>
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={() => onDone(false)}>
       <View style={styles.overlay}>
         <View style={styles.sheet}>
           <View style={styles.dragHandle} />
@@ -110,7 +110,7 @@ export default function RatingModal({ visible, deliveryId, driverName, onDone }:
           </TouchableOpacity>
 
           {/* Skip */}
-          <TouchableOpacity style={styles.skipBtn} onPress={onDone}>
+          <TouchableOpacity style={styles.skipBtn} onPress={() => onDone(false)}>
             <Text style={styles.skipBtnText}>Skip</Text>
           </TouchableOpacity>
         </View>

@@ -1,9 +1,13 @@
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
+import api from '@/services/api';
+import { downloadReceipt } from '@/utils/receipt';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+    ActivityIndicator,
+    Alert,
     Animated,
     Platform,
     StyleSheet,
@@ -17,15 +21,51 @@ export default function DeliveryCompleteScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
 
+  const deliveryId = params.deliveryId as string;
   const price = params.price as string || '0';
   const pickupLabel = params.pickupLabel as string || '';
   const destLabel = params.destLabel as string || '';
   const distance = params.distance as string || '';
   const eta = params.eta as string || '';
+  const recipientName = params.recipientName as string || '';
+
+  // Best-effort — fills in fare breakdown/weight/etc. for a richer
+  // receipt PDF. Screen works fine from params alone if this is slow/fails.
+  const [deliveryDetail, setDeliveryDetail] = useState<any>(null);
+  useEffect(() => {
+    if (!deliveryId) return;
+    api.get(`/deliveries/${deliveryId}/status`)
+      .then(({ data }) => { if (data?.success) setDeliveryDetail(data.data); })
+      .catch(() => {});
+  }, [deliveryId]);
 
   const [showReceipt, setShowReceipt] = useState(false);
+  const [downloadingReceipt, setDownloadingReceipt] = useState(false);
   const receiptAnim = useRef(new Animated.Value(500)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
+
+  const handleDownloadReceipt = async () => {
+    setDownloadingReceipt(true);
+    try {
+      await downloadReceipt({
+        deliveryId,
+        date: deliveryDetail?.timeline?.deliveredAt || deliveryDetail?.updatedAt,
+        price: deliveryDetail?.price ?? price,
+        pickupLabel: deliveryDetail?.pickupAddress?.label || pickupLabel,
+        destLabel: deliveryDetail?.recipient?.address?.label || destLabel,
+        recipientName: deliveryDetail?.recipient?.name || recipientName,
+        distanceKm: deliveryDetail?.distanceKm ?? (distance || null),
+        weightKg: deliveryDetail?.weightKg,
+        packageType: deliveryDetail?.packageType,
+        rideType: deliveryDetail?.rideType,
+        fareBreakdown: deliveryDetail?.fareBreakdown,
+      });
+    } catch (err) {
+      Alert.alert('Could not generate receipt', 'Please try again in a moment.');
+    } finally {
+      setDownloadingReceipt(false);
+    }
+  };
 
   const pickupShort = pickupLabel?.split(',').slice(0, 2).join(',') || 'Pickup location';
   const destShort = destLabel?.split(',').slice(0, 2).join(',') || 'Destination';
@@ -71,10 +111,6 @@ export default function DeliveryCompleteScreen() {
           <View style={styles.routeRow}>
             <View style={styles.redDot} />
             <Text style={styles.routeText} numberOfLines={1}>{pickupShort}</Text>
-            <TouchableOpacity style={styles.changeBtn}>
-              <Ionicons name="calendar-outline" size={14} color={Colors.textSecondary} />
-              <Text style={styles.changeBtnText}>Change</Text>
-            </TouchableOpacity>
           </View>
 
           <View style={styles.routeConnector} />
@@ -151,16 +187,19 @@ export default function DeliveryCompleteScreen() {
 
           <View style={styles.receiptDivider} />
 
-          <TouchableOpacity style={styles.receiptOption}>
-            <Ionicons name="arrow-down-outline" size={20} color={Colors.textPrimary} />
-            <Text style={styles.receiptOptionText}>Download receipt</Text>
-          </TouchableOpacity>
-
-          <View style={styles.receiptDivider} />
-
-          <TouchableOpacity style={styles.receiptOption}>
-            <Ionicons name="mail-outline" size={20} color={Colors.textPrimary} />
-            <Text style={styles.receiptOptionText}>Send receipt to email</Text>
+          <TouchableOpacity
+            style={styles.receiptOption}
+            onPress={handleDownloadReceipt}
+            disabled={downloadingReceipt}
+            activeOpacity={0.7}
+          >
+            {downloadingReceipt
+              ? <ActivityIndicator size="small" color={Colors.textPrimary} />
+              : <Ionicons name="arrow-down-outline" size={20} color={Colors.textPrimary} />
+            }
+            <Text style={styles.receiptOptionText}>
+              {downloadingReceipt ? 'Preparing receipt...' : 'Download receipt'}
+            </Text>
           </TouchableOpacity>
         </Animated.View>
       )}
@@ -202,8 +241,6 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.poppins.regular, fontSize: 14, color: Colors.textPrimary,
     flex: 1,
   },
-  changeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  changeBtnText: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary },
   distanceText: { fontFamily: Fonts.poppins.regular, fontSize: 12, color: Colors.textSecondary },
   routeConnector: { width: 1.5, height: 16, backgroundColor: Colors.border, marginLeft: 5 },
 
