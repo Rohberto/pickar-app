@@ -3,6 +3,7 @@ import { Fonts } from '@/constants/fonts';
 import { DRIVER_RIDE_TYPES, RideTypeKey } from '@/constants/rideTypes';
 import { useAuth } from '@/hooks/useAuth';
 import api from '@/services/api';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
@@ -174,7 +175,7 @@ export default function DriverAccountScreen() {
       formData.append('upload_preset', CLOUDINARY_PRESET);
       formData.append('folder', 'pickar/drivers');
 
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
         { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } }
       );
@@ -931,7 +932,7 @@ function DocumentCard({
       formData.append('upload_preset', 'pickar_profiles');
       formData.append('folder', 'pickar/documents');
 
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `https://api.cloudinary.com/v1_1/dtr1shkje/image/upload`,
         { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } }
       );

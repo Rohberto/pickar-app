@@ -121,6 +121,21 @@ export default function NavigatePickupScreen() {
   const [navigationActive, setNavigationActive] = useState(false);
   const [routeLoading, setRouteLoading] = useState(false);
   const [arrivalDetected, setArrivalDetected] = useState(false);
+  // startLocationTracking's watchPositionAsync callback is registered once
+  // at mount and calls onLocationUpdate — a plain function closing over
+  // whatever `arrivalDetected` was AT THAT RENDER (false, forever), since
+  // the watcher is never re-subscribed on re-render. setArrivalDetected(true)
+  // updates React state fine, but the stale closure never sees it, so the
+  // `!arrivalDetected` gate below was permanently true and the "You've
+  // Arrived" alert re-fired on every GPS tick even after confirming. A ref
+  // is read fresh on every call regardless of which render created the
+  // closure, so it actually gates correctly.
+  const arrivalDetectedRef  = useRef(false);
+  // Same stale-closure issue applies to navigationActive — onLocationUpdate
+  // reads it directly at lines below (reroute-while-driving, map recenter),
+  // so without a ref those never actually engage after "Start Navigation"
+  // is tapped, even though the button/UI state itself updates fine.
+  const navigationActiveRef = useRef(false);
 
   const mapRef              = useRef<MapView>(null);
   const socketRef           = useRef<Socket | null>(null);
@@ -156,6 +171,7 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
   useEffect(() => { driverProfileIdRef.current = driverProfileId; }, [driverProfileId]);
   useEffect(() => { stepsRef.current = steps; }, [steps]);
   useEffect(() => { currentStepRef.current = currentStepIndex; }, [currentStepIndex]);
+  useEffect(() => { navigationActiveRef.current = navigationActive; }, [navigationActive]);
 
   useEffect(() => {
     if (!driverProfileId) return;
@@ -163,12 +179,23 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
   }, [driverProfileId]);
 
   // ─── Fetch driver profile ────────────────────────────────────
-  const fetchDriverProfile = async () => {
+  // driverProfileId gates joining the driver's socket room and every
+  // subsequent location broadcast on this screen (see the effect above and
+  // onLocationUpdate below) — if this single request fails and is never
+  // retried, the driver silently stops broadcasting location and can't be
+  // rejoined to their room for the rest of the pickup leg, with no visible
+  // error to them. A transient failure (backend cold-start, brief network
+  // blip — exactly what "Network Error" looks like) shouldn't be
+  // unrecoverable, so retry a few times with backoff before giving up.
+  const fetchDriverProfile = async (attempt = 1) => {
     try {
       const { data } = await api.get('/drivers/me');
       if (data.success) setDriverProfileId(data.data._id);
     } catch (err) {
-      console.error('[NavigatePickup] fetchDriverProfile:', err);
+      console.error(`[NavigatePickup] fetchDriverProfile attempt ${attempt}:`, err);
+      if (attempt < 4 && isMountedRef.current) {
+        setTimeout(() => fetchDriverProfile(attempt + 1), attempt * 3000);
+      }
     }
   };
 
@@ -285,7 +312,7 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
     // steps, and distance/ETA stay accurate to the driver's real position
     // instead of drifting from a single snapshot taken at nav start —
     // mirrors how Google Maps recalculates as you drive.
-    if (navigationActive) {
+    if (navigationActiveRef.current) {
       const last = lastRouteOriginRef.current;
       const movedFar = !last || haversineMetres(lat, lng, last.latitude, last.longitude) > 60;
       const stale = Date.now() - lastRouteFetchAtRef.current > 20000;
@@ -295,14 +322,22 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
     }
 
     // Auto-arrival detection
-    if (distM < ARRIVAL_THRESHOLD_M && !arrivalDetected) {
+    if (distM < ARRIVAL_THRESHOLD_M && !arrivalDetectedRef.current) {
+      arrivalDetectedRef.current = true;
       setArrivalDetected(true);
       if (isMountedRef.current) {
         Alert.alert(
           "You've Arrived! 🎉",
           'You are at the pickup location.',
           [
-            { text: 'Not yet', style: 'cancel', onPress: () => setArrivalDetected(false) },
+            {
+              text: 'Not yet',
+              style: 'cancel',
+              onPress: () => {
+                arrivalDetectedRef.current = false;
+                setArrivalDetected(false);
+              },
+            },
             { text: 'Confirm Arrival', onPress: () => setState('arrived') },
           ]
         );
@@ -310,7 +345,7 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
     }
 
     // Re-centre map on driver with heading tilt
-    if (navigationActive) {
+    if (navigationActiveRef.current) {
       mapRef.current?.animateToRegion({
         latitude: lat,
         longitude: lng,

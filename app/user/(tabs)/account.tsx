@@ -2,6 +2,7 @@ import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
 import api from '@/services/api';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
@@ -89,7 +90,7 @@ export default function AccountScreen() {
       formData.append('upload_preset', CLOUDINARY_PRESET);
       formData.append('folder', 'pickar/profiles');
 
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
         { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } }
       );

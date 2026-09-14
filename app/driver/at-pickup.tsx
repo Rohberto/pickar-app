@@ -73,12 +73,18 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
   }, [driverProfileId]);
 
   // ─── Driver profile ───────────────────────────────────────────────
-  const fetchDriverProfile = async () => {
+  // Same fragility fixed elsewhere in the driver flow — a single failed
+  // request here would silently leave driverProfileId null for the rest of
+  // this screen. Retry with backoff before giving up.
+  const fetchDriverProfile = async (attempt = 1) => {
     try {
       const { data } = await api.get('/drivers/me');
       if (data.success) setDriverProfileId(data.data._id);
     } catch (err) {
-      console.error('[AtPickup] fetchDriverProfile:', err);
+      console.error(`[AtPickup] fetchDriverProfile attempt ${attempt}:`, err);
+      if (attempt < 4 && isMountedRef.current) {
+        setTimeout(() => fetchDriverProfile(attempt + 1), attempt * 3000);
+      }
     }
   };
 

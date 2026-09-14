@@ -87,12 +87,17 @@ export default function DriverLoginScreen() {
           email: response.data.user.email,
           type: 'driver',
         });
- const token = await registerForPushNotifications();
-      if (token) {
-        api.patch('/drivers/push-token', { token }).catch(() => {});
-      }
-        // Navigate to driver home
+        // Navigate first — push-token registration is best-effort and must
+        // never block login. It previously ran awaited above this line, so
+        // a hung permission prompt or push-token call (e.g. missing
+        // project id) left the login spinner stuck forever, which is what
+        // Apple's reviewer hit on a real iPad. Fire-and-forget instead.
         router.replace('/driver/(tabs)/Home' as never);
+        registerForPushNotifications()
+          .then((token) => {
+            if (token) api.patch('/drivers/push-token', { token }).catch(() => {});
+          })
+          .catch(() => {});
       }
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Login failed');

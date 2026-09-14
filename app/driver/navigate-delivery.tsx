@@ -132,6 +132,16 @@ export default function NavigateDeliveryScreen() {
   const [navigationActive, setNavigationActive] = useState(false);
   const [arrivalDetected, setArrivalDetected]   = useState(false);
   const [dashPhase, setDashPhase]           = useState(0);
+  // startLocationTracking's watchPositionAsync callback is registered once
+  // at mount and calls onLocationUpdate — a plain function closing over
+  // whatever `arrivalDetected`/`navigationActive` were AT THAT RENDER,
+  // forever. setArrivalDetected/setNavigationActive update React state
+  // fine for rendering, but this stale closure never sees the update, so
+  // reading the state directly inside it is a bug. Same issue already
+  // found and fixed in navigate-pickup.tsx — mirrored here with refs kept
+  // in sync via the effects below.
+  const arrivalDetectedRef  = useRef(false);
+  const navigationActiveRef = useRef(false);
 
   const mapRef             = useRef<MapView>(null);
   const socketRef          = useRef<Socket | null>(null);
@@ -174,6 +184,7 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
   useEffect(() => { driverProfileIdRef.current = driverProfileId; }, [driverProfileId]);
   useEffect(() => { stepsRef.current = steps; }, [steps]);
   useEffect(() => { currentStepRef.current = currentStepIndex; }, [currentStepIndex]);
+  useEffect(() => { navigationActiveRef.current = navigationActive; }, [navigationActive]);
   useEffect(() => {
     if (driverProfileId) socketRef.current?.emit('join_driver_room', { driverId: driverProfileId });
   }, [driverProfileId]);
@@ -320,7 +331,7 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
     // Reroute periodically while navigating so the polyline, turn-by-turn
     // steps, and distance/ETA stay accurate to the driver's real position
     // instead of drifting from a single snapshot taken at nav start.
-    if (navigationActive) {
+    if (navigationActiveRef.current) {
       const last = lastRouteOriginRef.current;
       const movedFar = !last || haversineMetres(lat, lng, last.latitude, last.longitude) > 60;
       const stale = Date.now() - lastRouteFetchAtRef.current > 20000;
@@ -330,14 +341,22 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
     }
 
     // Auto-arrival detection
-    if (distM < ARRIVAL_THRESHOLD_M && !arrivalDetected) {
+    if (distM < ARRIVAL_THRESHOLD_M && !arrivalDetectedRef.current) {
+      arrivalDetectedRef.current = true;
       setArrivalDetected(true);
       if (isMountedRef.current) {
         Alert.alert(
           "You've Arrived! 🎉",
           'You are at the drop-off location.',
           [
-            { text: 'Not yet', style: 'cancel', onPress: () => setArrivalDetected(false) },
+            {
+              text: 'Not yet',
+              style: 'cancel',
+              onPress: () => {
+                arrivalDetectedRef.current = false;
+                setArrivalDetected(false);
+              },
+            },
             { text: 'Complete Delivery', onPress: () => setState('arrived') },
           ]
         );
@@ -345,7 +364,7 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
     }
 
     // Keep map centred on driver in navigation mode
-    if (navigationActive) {
+    if (navigationActiveRef.current) {
       mapRef.current?.animateToRegion({
         latitude: lat, longitude: lng,
         latitudeDelta: 0.005, longitudeDelta: 0.005,
@@ -376,12 +395,20 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
     });
   };
 
-  const fetchDriverProfile = async () => {
+  // Same fragility fixed in navigate-pickup.tsx and driver Home.tsx —
+  // driverProfileId gates the driver's socket room + location broadcasts on
+  // this screen, so a single failed request here (e.g. a transient
+  // "Network Error") would otherwise silently break both for the rest of
+  // the delivery leg. Retry with backoff instead of giving up after one try.
+  const fetchDriverProfile = async (attempt = 1) => {
     try {
       const { data } = await api.get('/drivers/me');
       if (data.success) setDriverProfileId(data.data._id);
     } catch (err) {
-      console.error('[NavigateDelivery] fetchDriverProfile:', err);
+      console.error(`[NavigateDelivery] fetchDriverProfile attempt ${attempt}:`, err);
+      if (attempt < 4 && isMountedRef.current) {
+        setTimeout(() => fetchDriverProfile(attempt + 1), attempt * 3000);
+      }
     }
   };
 

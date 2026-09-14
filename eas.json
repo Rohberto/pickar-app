@@ -6,13 +6,48 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://pickar-backend.onrender.com/api",
+        "EXPO_PUBLIC_SOCKET_URL": "https://pickar-backend.onrender.com",
+        "EXPO_PUBLIC_ENV": "development",
+        "EXPO_PUBLIC_GOOGLE_MAPS_KEY": "AIzaSyCKM6_Sg7hd1Omb8FbmNl_PUyByh84-8wQ",
+        "EXPO_PUBLIC_PROJECT_ID": "c77e2709-aacb-4cc5-95b7-5b6a04ce411f"
+      }
+    },
+    "development-simulator": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://pickar-backend.onrender.com/api",
+        "EXPO_PUBLIC_SOCKET_URL": "https://pickar-backend.onrender.com",
+        "EXPO_PUBLIC_ENV": "development",
+        "EXPO_PUBLIC_GOOGLE_MAPS_KEY": "AIzaSyCKM6_Sg7hd1Omb8FbmNl_PUyByh84-8wQ",
+        "EXPO_PUBLIC_PROJECT_ID": "c77e2709-aacb-4cc5-95b7-5b6a04ce411f"
+      }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://pickar-backend.onrender.com/api",
+        "EXPO_PUBLIC_SOCKET_URL": "https://pickar-backend.onrender.com",
+        "EXPO_PUBLIC_ENV": "production",
+        "EXPO_PUBLIC_GOOGLE_MAPS_KEY": "AIzaSyCKM6_Sg7hd1Omb8FbmNl_PUyByh84-8wQ",
+        "EXPO_PUBLIC_PROJECT_ID": "c77e2709-aacb-4cc5-95b7-5b6a04ce411f"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://pickar-backend.onrender.com/api",
+        "EXPO_PUBLIC_SOCKET_URL": "https://pickar-backend.onrender.com",
+        "EXPO_PUBLIC_ENV": "production",
+        "EXPO_PUBLIC_GOOGLE_MAPS_KEY": "AIzaSyCKM6_Sg7hd1Omb8FbmNl_PUyByh84-8wQ",
+        "EXPO_PUBLIC_PROJECT_ID": "c77e2709-aacb-4cc5-95b7-5b6a04ce411f"
+      }
     }
   },
   "submit": {

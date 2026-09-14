@@ -3,6 +3,7 @@ import VehicleSetupModal from '@/components/VehicleSetupModal';
 import { Colors } from '@/constants/colors';
 import { Fonts } from '@/constants/fonts';
 import { useAuth } from '@/hooks/useAuth';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import api from '@/services/api';
 import { storage } from '@/utils/storage';
 import { Ionicons } from '@expo/vector-icons';
@@ -204,7 +205,15 @@ export default function DriverHomeScreen() {
   useEffect(() => { driverLocationRef.current = driverLocation; }, [driverLocation]);
 
   // ─── Driver profile ───────────────────────────────────────────────
-  const fetchDriverProfile = async () => {
+  // This is a mount-only fetch ([] effect above) that gates the driver's
+  // entire session — connectSocket(), fetchStats(), and checkActiveTrip()
+  // all wait on driverProfileId being set (see the effect right above this
+  // function). A single failed request here (backend cold-start, brief
+  // network blip — an axios "Network Error") previously meant the driver
+  // never got a socket connection or online status restored for the whole
+  // session, with nothing telling them why "Go Online" wasn't working.
+  // Retry with backoff before giving up.
+  const fetchDriverProfile = async (attempt = 1) => {
     try {
       const { data } = await api.get('/drivers/me');
       if (data.success) {
@@ -224,6 +233,7 @@ export default function DriverHomeScreen() {
           goOnlineNow(data.data._id);
         }
       }
+      setProfileLoading(false);
     } catch (err) {
       console.error('Failed to fetch driver profile:', err);
       if (err instanceof Error) {
@@ -231,8 +241,11 @@ export default function DriverHomeScreen() {
       } else {
         console.log('[DriverHome] fetchDriverProfile:', String(err));
       }
-    } finally {
-      setProfileLoading(false);
+      if (attempt < 4 && isMountedRef.current) {
+        setTimeout(() => fetchDriverProfile(attempt + 1), attempt * 3000);
+      } else {
+        setProfileLoading(false);
+      }
     }
   };
 
@@ -460,7 +473,7 @@ export default function DriverHomeScreen() {
       formData.append('upload_preset', CLOUDINARY_PRESET);
       formData.append('folder', 'pickar/drivers');
 
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
         { method: 'POST', body: formData, headers: { 'Content-Type': 'multipart/form-data' } }
       );
