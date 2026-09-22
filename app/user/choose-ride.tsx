@@ -144,7 +144,23 @@ export default function ChooseRideScreen() {
   useEffect(() => {
     fetchRideOptions();
     fetchDeliveryDetails();
+    // Fetch wallet balance up front (not just when the wallet modal is
+    // opened) so we can warn about insufficient funds right here, while
+    // the user is still picking a ride — instead of them only finding out
+    // much later, deep into the booking flow at pickup confirmation.
+    fetchWalletBalance();
   }, []);
+
+  const fetchWalletBalance = async () => {
+    try {
+      const response = await api.get('/wallet');
+      if (response.data.success) {
+        setWalletBalance(response.data.data.balance ?? 0);
+      }
+    } catch (error: any) {
+      console.error('Error fetching wallet balance:', error.response?.data || error.message);
+    }
+  };
 
   const fetchDeliveryDetails = async () => {
     try {
@@ -250,18 +266,16 @@ export default function ChooseRideScreen() {
   const handleOpenWallet = async () => {
     setShowWalletModal(true);
     setWalletLoading(true);
-    try {
-      const response = await api.get('/wallet');
-      if (response.data.success) {
-        setWalletBalance(response.data.data.balance ?? 0);
-      }
-    } catch (error: any) {
-      console.error('Error fetching wallet balance:', error.response?.data || error.message);
-      setWalletBalance(null);
-    } finally {
-      setWalletLoading(false);
-    }
+    await fetchWalletBalance();
+    setWalletLoading(false);
   };
+
+  // Selected ride's cost vs current wallet balance — drives the early
+  // insufficient-balance warning below, computed right where the user is
+  // choosing (not deep into the flow at payment/pickup time).
+  const selectedOption = rideOptions.find((o) => o.rideType === selectedRide) || null;
+  const insufficientBalance =
+    !!selectedOption && walletBalance !== null && walletBalance < selectedOption.total;
 
   const handleSelectRide = async () => {
     if (!selectedRide) {
@@ -454,6 +468,16 @@ const getRideIcon = (type: string) => {
             </View>
           )}
 
+          {insufficientBalance && (
+            <View style={styles.insufficientBanner}>
+              <Ionicons name="alert-circle" size={18} color="#DC2626" />
+              <Text style={styles.insufficientBannerText}>
+                Your wallet balance (₦{walletBalance!.toLocaleString()}) is below the
+                ₦{selectedOption!.total.toLocaleString()} needed for this ride. Top up to continue.
+              </Text>
+            </View>
+          )}
+
           {/* Wallet — opens a modal instead of navigating away, so selecting
               a ride type isn't lost just to check the balance */}
           <Pressable style={styles.walletButton} onPress={handleOpenWallet}>
@@ -468,17 +492,20 @@ const getRideIcon = (type: string) => {
           <View style={{ height: 100 }} />
         </ScrollView>
 
-        {/* Select Ride Button */}
+        {/* Select Ride Button — becomes a "Top Up" shortcut instead of
+            letting the user proceed into a booking they can't pay for */}
         <View style={styles.buttonContainer}>
           <Pressable
             style={styles.selectButton}
-            onPress={handleSelectRide}
+            onPress={insufficientBalance ? () => router.push('/user/wallet' as never) : handleSelectRide}
             disabled={!selectedRide || submitting}
           >
             {submitting ? (
               <ActivityIndicator color={Colors.white} />
             ) : (
-              <Text style={styles.selectButtonText}>Select Ride</Text>
+              <Text style={styles.selectButtonText}>
+                {insufficientBalance ? 'Top Up Wallet' : 'Select Ride'}
+              </Text>
             )}
           </Pressable>
         </View>
@@ -700,6 +727,25 @@ rideIcon: {
     fontSize: 14,
     fontFamily: Fonts.poppins.regular,
     color: Colors.textSecondary,
+  },
+  insufficientBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginHorizontal: 20,
+    marginTop: 8,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  insufficientBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: Fonts.poppins.medium,
+    color: '#DC2626',
+    lineHeight: 18,
   },
 walletButton: {
   flexDirection: 'row',

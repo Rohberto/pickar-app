@@ -15,6 +15,9 @@ export const useAuth = () => {
     setRememberMe,
     logout,
     loadStoredAuth,
+    saveLoginCredentials,
+    getSavedLoginCredentials,
+    clearSavedLoginCredentials,
   } = useAuthStore();
 
   return {
@@ -31,5 +34,8 @@ export const useAuth = () => {
     setRememberMe,
     logout,
     loadStoredAuth,
+    saveLoginCredentials,
+    getSavedLoginCredentials,
+    clearSavedLoginCredentials,
   };
 };

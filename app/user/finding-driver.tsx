@@ -746,7 +746,6 @@ export default function FindingDriverScreen() {
           style={StyleSheet.absoluteFillObject}
           provider={PROVIDER_GOOGLE}
           initialRegion={mapRegion}
-          customMapStyle={MAP_STYLE}
           showsUserLocation={false}
           showsCompass={false}
           showsMyLocationButton={false}

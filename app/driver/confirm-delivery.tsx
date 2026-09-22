@@ -30,6 +30,7 @@ export default function ConfirmDeliveryScreen() {
   const eta             = params.eta             as string;
 
   const [scannerVisible, setScannerVisible] = useState(false);
+  const [manualEntry, setManualEntry]       = useState(false);
   const [loading, setLoading]               = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
 
@@ -149,7 +150,7 @@ export default function ConfirmDeliveryScreen() {
       <View style={styles.footer}>
         <TouchableOpacity
           style={[styles.scanBtn, loading && styles.scanBtnDisabled]}
-          onPress={() => setScannerVisible(true)}
+          onPress={() => { setManualEntry(false); setScannerVisible(true); }}
           disabled={loading}
           activeOpacity={0.85}
         >
@@ -165,6 +166,17 @@ export default function ConfirmDeliveryScreen() {
             </>
           )}
         </TouchableOpacity>
+
+        {!loading && (
+          <TouchableOpacity
+            style={styles.manualLinkBtn}
+            onPress={() => { setManualEntry(true); setScannerVisible(true); }}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="keypad-outline" size={16} color={Colors.primary} style={{ marginRight: 6 }} />
+            <Text style={styles.manualLinkText}>Enter code manually instead</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* QR SCANNER MODAL */}
@@ -177,6 +189,7 @@ export default function ConfirmDeliveryScreen() {
         }}
         title="Scan Delivery QR"
         hint="Scan the QR code on the recipient's phone"
+        initialManualMode={manualEntry}
       />
     </SafeAreaView>
   );
@@ -245,4 +258,9 @@ const styles = StyleSheet.create({
   scanBtnDisabled: { backgroundColor: `${Colors.primary}40` },
   scanBtnText: { fontFamily: Fonts.poppins.semiBold, fontSize: 16, color: Colors.white },
   loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  manualLinkBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    marginTop: 14, paddingVertical: 6,
+  },
+  manualLinkText: { fontFamily: Fonts.poppins.semiBold, fontSize: 14, color: Colors.primary },
 });

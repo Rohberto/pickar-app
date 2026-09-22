@@ -362,7 +362,6 @@ export default function HomeScreen() {
         onMapReady={() => setMapReady(true)}
         style={StyleSheet.absoluteFillObject}
         provider={PROVIDER_GOOGLE}
-        customMapStyle={MAP_STYLE}
         showsCompass={false}
         showsMyLocationButton={false}
         toolbarEnabled={false}

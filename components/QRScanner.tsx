@@ -21,6 +21,7 @@ interface Props {
   onScanned: (code: string) => void;
   title?: string;
   hint?: string;
+  initialManualMode?: boolean;
 }
 
 export default function QRScanner({
@@ -29,22 +30,23 @@ export default function QRScanner({
   onScanned,
   title = 'Scan QR Code',
   hint = 'Point your camera at the QR code',
+  initialManualMode = false,
 }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
-  const [manualMode, setManualMode] = useState(false);
+  const [manualMode, setManualMode] = useState(initialManualMode);
   const [manualCode, setManualCode] = useState('');
   const scanLineAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (visible) {
       setScanned(false);
-      setManualMode(false);
+      setManualMode(initialManualMode);
       setManualCode('');
       startScanAnimation();
-      if (!permission?.granted) requestPermission();
+      if (!initialManualMode && !permission?.granted) requestPermission();
     }
-  }, [visible]);
+  }, [visible, initialManualMode]);
 
   const handleManualSubmit = () => {
     const code = manualCode.trim();

@@ -197,7 +197,6 @@ export default function ConfirmPickupScreen() {
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
         provider={PROVIDER_GOOGLE}
-        customMapStyle={MAP_STYLE}
         showsCompass={false}
         showsMyLocationButton={false}
         toolbarEnabled={false}

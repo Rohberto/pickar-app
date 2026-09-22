@@ -218,7 +218,6 @@ useVerifyActiveTrip(deliveryId, () => router.replace('/driver/(tabs)/Home' as ne
       <MapView
         style={StyleSheet.absoluteFillObject}
         provider={PROVIDER_GOOGLE}
-        customMapStyle={MAP_STYLE}
         showsCompass={false}
         showsMyLocationButton={false}
         toolbarEnabled={false}

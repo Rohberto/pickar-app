@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1080183233322",
+    "project_id": "pickar-de26e",
+    "storage_bucket": "pickar-de26e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1080183233322:android:2a8b247738d3acb7469c53",
+        "android_client_info": {
+          "package_name": "com.pickarenterprises.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBIzNl_DBhdk1KzcbhWvWqOdLdCvUApd1M"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

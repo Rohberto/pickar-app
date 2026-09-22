@@ -48,10 +48,15 @@ export default function VerifyOTPScreen() {
   const handleComplete = (code: string) => {
     setOtp(code);
     Keyboard.dismiss();
+    // Auto-submit as soon as all 4 digits are entered — pass the code
+    // directly rather than relying on state, since setOtp above hasn't
+    // committed yet on this render.
+    handleVerify(code);
   };
 
-  const handleVerify = async () => {
-    if (otp.length !== 4) return;
+  const handleVerify = async (codeOverride?: string) => {
+    const codeToVerify = codeOverride ?? otp;
+    if (codeToVerify.length !== 4 || loading) return;
 
     Keyboard.dismiss();
     setLoading(true);
@@ -59,7 +64,7 @@ export default function VerifyOTPScreen() {
     try {
       const response = await authService.verifyOTP({
         email,
-        otp,
+        otp: codeToVerify,
       });
 
       if (response.success && response.data) {
@@ -143,7 +148,7 @@ export default function VerifyOTPScreen() {
         <View style={styles.footer}>
           <Button
             title="Verify"
-            onPress={handleVerify}
+            onPress={() => handleVerify()}
             loading={loading}
             disabled={otp.length !== 4}
           />

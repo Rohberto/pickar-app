@@ -158,7 +158,6 @@ export default function TrackPackageScreen() {
           <MapView
             style={StyleSheet.absoluteFillObject}
             provider={PROVIDER_GOOGLE}
-            customMapStyle={MAP_STYLE}
             showsCompass={false}
             showsMyLocationButton={false}
             toolbarEnabled={false}

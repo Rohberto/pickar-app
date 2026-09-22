@@ -102,7 +102,13 @@ export default function DriverHomeScreen() {
   const [driverProfileId, setDriverProfileId] = useState<string | null>(null);
   const [driverPhoto, setDriverPhoto] = useState<string | null>((user as any)?.photo ?? null);
   const [driverLocation, setDriverLocation] = useState<{ latitude: number; longitude: number } | null>(null);
-  const [incomingRequest, setIncomingRequest] = useState<IncomingRequest | null>(null);
+  // Queue of pending offers rather than a single object — previously a
+  // second 'trip_offer' arriving while one was already showing silently
+  // overwrote it (driver never saw the first request at all, even though
+  // the backend was still waiting on a response for it). Now every offer
+  // is kept and shown in turn instead of being dropped.
+  const [requestQueue, setRequestQueue] = useState<IncomingRequest[]>([]);
+  const incomingRequest = requestQueue[0] ?? null;
   const [activeTrips, setActiveTrips] = useState<string[]>([]);
   const [accepting, setAccepting] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -383,7 +389,7 @@ export default function DriverHomeScreen() {
     });
 
     socket.on('trip_offer', (payload: TripOffer) => {
-      setIncomingRequest({
+      const offer: IncomingRequest = {
         deliveryId: payload.deliveryId,
         userName: payload.recipientName ?? 'Customer',
         userPhoto: payload.userPhoto,
@@ -396,8 +402,19 @@ export default function DriverHomeScreen() {
         estimatedDuration: payload.timeoutSeconds
           ? `${Math.ceil(payload.timeoutSeconds / 60)} mins`
           : '30 mins',
+      };
+      setRequestQueue((prev) => {
+        // Defensive de-dupe — don't queue the same delivery twice
+        if (prev.some((r) => r.deliveryId === offer.deliveryId)) return prev;
+        const wasEmpty = prev.length === 0;
+        const next = [...prev, offer];
+        if (wasEmpty) {
+          // First offer showing right now — animate the sheet in.
+          // (subsequent queued offers show automatically as each one closes)
+          setTimeout(() => showSheet(), 0);
+        }
+        return next;
       });
-      showSheet();
     });
   };
 
@@ -503,7 +520,19 @@ export default function DriverHomeScreen() {
     Animated.parallel([
       Animated.timing(sheetAnim, { toValue: 700, duration: 280, useNativeDriver: true }),
       Animated.timing(backdropAnim, { toValue: 0, duration: 250, useNativeDriver: true }),
-    ]).start(() => setIncomingRequest(null));
+    ]).start(() => {
+      setRequestQueue((prev) => {
+        const rest = prev.slice(1);
+        if (rest.length > 0) {
+          // Another request was waiting behind this one — show it next
+          // instead of it staying silently queued forever.
+          sheetAnim.setValue(700);
+          backdropAnim.setValue(0);
+          setTimeout(() => showSheet(), 300);
+        }
+        return rest;
+      });
+    });
   };
 
   // ─── Accept / Decline ─────────────────────────────────────────────
@@ -561,7 +590,6 @@ export default function DriverHomeScreen() {
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
         provider={PROVIDER_GOOGLE}
-        customMapStyle={MAP_STYLE}
         showsCompass={false}
         showsMyLocationButton={false}
         toolbarEnabled={false}
@@ -727,6 +755,15 @@ export default function DriverHomeScreen() {
             <View style={styles.multiPkgBanner}>
               <Ionicons name="layers-outline" size={15} color={Colors.primary} />
               <Text style={styles.multiPkgText}>Add this package to your current route</Text>
+            </View>
+          )}
+
+          {requestQueue.length > 1 && (
+            <View style={styles.multiPkgBanner}>
+              <Ionicons name="time-outline" size={15} color={Colors.primary} />
+              <Text style={styles.multiPkgText}>
+                {requestQueue.length - 1} more request{requestQueue.length > 2 ? 's' : ''} waiting after this one
+              </Text>
             </View>
           )}
 

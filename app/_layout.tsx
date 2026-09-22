@@ -3,6 +3,7 @@ import { useFonts } from '@/hooks/useFonts';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useState } from 'react';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -40,19 +41,21 @@ useEffect(() => {
 
   // Always render Stack immediately (important for Expo Router)
   return (
-    <Stack
-      screenOptions={{
-        headerShown: false,
-        animation: 'fade',
-        animationDuration: 300,
-      }}
-    >
-      <Stack.Screen name="index" />
-      <Stack.Screen name="splash" />
-      <Stack.Screen name="onboarding" />
-      <Stack.Screen name="auth" />
-      <Stack.Screen name="user" />
-      <Stack.Screen name="driver" />
-    </Stack>
+    <SafeAreaProvider>
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          animation: 'fade',
+          animationDuration: 300,
+        }}
+      >
+        <Stack.Screen name="index" />
+        <Stack.Screen name="splash" />
+        <Stack.Screen name="onboarding" />
+        <Stack.Screen name="auth" />
+        <Stack.Screen name="user" />
+        <Stack.Screen name="driver" />
+      </Stack>
+    </SafeAreaProvider>
   );
 }

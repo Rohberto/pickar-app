@@ -1,5 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import { create } from 'zustand';
+
+const SAVED_CREDENTIALS_KEY = 'savedLoginCredentials';
 
 type UserType = 'user' | 'driver' | null;
 
@@ -29,6 +32,14 @@ interface AuthState {
   setRememberMe: (value: boolean) => Promise<void>;
   logout: () => Promise<void>;
   loadStoredAuth: () => Promise<void>;
+
+  // "Remember me" credential prefill — separate from session persistence
+  // above. Saves the email/password typed at login (securely, via the
+  // platform keychain) so the login form can be prefilled next time,
+  // regardless of whether the session itself stayed logged in.
+  saveLoginCredentials: (email: string, password: string) => Promise<void>;
+  getSavedLoginCredentials: () => Promise<{ email: string; password: string } | null>;
+  clearSavedLoginCredentials: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -89,6 +100,36 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       'user',
       'rememberMe',
     ]);
+    // Note: saved login credentials are intentionally NOT cleared on
+    // logout — "remember me" is about prefilling the login form next
+    // time, which should survive a normal logout. They're only cleared
+    // when the user unchecks "remember me" on a subsequent login.
+  },
+
+  saveLoginCredentials: async (email, password) => {
+    try {
+      await SecureStore.setItemAsync(SAVED_CREDENTIALS_KEY, JSON.stringify({ email, password }));
+    } catch (err) {
+      console.warn('Failed to save login credentials:', err);
+    }
+  },
+
+  getSavedLoginCredentials: async () => {
+    try {
+      const raw = await SecureStore.getItemAsync(SAVED_CREDENTIALS_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      console.warn('Failed to read saved login credentials:', err);
+      return null;
+    }
+  },
+
+  clearSavedLoginCredentials: async () => {
+    try {
+      await SecureStore.deleteItemAsync(SAVED_CREDENTIALS_KEY);
+    } catch (err) {
+      console.warn('Failed to clear saved login credentials:', err);
+    }
   },
 
   loadStoredAuth: async () => {

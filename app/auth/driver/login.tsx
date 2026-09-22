@@ -26,10 +26,10 @@ import { registerForPushNotifications } from '../../../services/notificationServ
 
 export default function DriverLoginScreen() {
   const router = useRouter();
-  const { setAuthenticated, setUserType, setUser, setRememberMe } = useAuth();
+  const { setAuthenticated, setUserType, setUser, setRememberMe, saveLoginCredentials, getSavedLoginCredentials, clearSavedLoginCredentials } = useAuth();
   const [loading, setLoading] = useState(false);
   const [fadeAnim] = useState(new Animated.Value(0));
-  
+
   const [formData, setFormData] = useState({
     email: '',
     password: '',
@@ -44,6 +44,14 @@ export default function DriverLoginScreen() {
       duration: 600,
       useNativeDriver: true,
     }).start();
+
+    // Prefill the form with previously "remembered" credentials, if any.
+    getSavedLoginCredentials().then((saved) => {
+      if (saved) {
+        setFormData({ email: saved.email, password: saved.password });
+        setLocalRememberMe(true);
+      }
+    });
   }, []);
 
   const validate = () => {
@@ -80,6 +88,11 @@ export default function DriverLoginScreen() {
         // Must be set before/alongside setAuthenticated so loadStoredAuth
         // knows on the next cold start whether to keep this session.
         await setRememberMe(rememberMe);
+        if (rememberMe) {
+          await saveLoginCredentials(formData.email, formData.password);
+        } else {
+          await clearSavedLoginCredentials();
+        }
         await setAuthenticated(true);
         setUser({
           id: response.data.user.id,

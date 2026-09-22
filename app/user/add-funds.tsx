@@ -105,11 +105,11 @@ export default function AddFundsScreen() {
     try {
       const { data } = await api.post('/wallet/verify-topup', { reference: ref });
       if (data.success) {
-        Alert.alert(
-          '🎉 Payment Successful',
-          `₦${data.data.amountAdded.toLocaleString()} has been added to your wallet.`,
-          [{ text: 'OK', onPress: () => router.back() }]
-        );
+        // Success is now delivered as a real system push notification
+        // (sent by the backend right after crediting), not an in-app
+        // Alert — so it still reaches the user even if they've already
+        // backgrounded the app during the Paystack redirect.
+        router.back();
       }
     } catch (err: any) {
       Alert.alert(
@@ -144,14 +144,12 @@ export default function AddFundsScreen() {
     try {
       const { data } = await api.post('/wallet/verify-topup', { reference: ref });
       if (data.success) {
-        // Payment was already successful — auto-route, no dialog needed
+        // Payment was already successful — auto-route. The push
+        // notification (sent by the backend) covers letting the user know,
+        // no in-app dialog needed here.
         paymentRefRef.current = null;
         setPaymentUrl(null);
-        Alert.alert(
-          '🎉 Payment Successful',
-          `₦${data.data.amountAdded.toLocaleString()} has been added to your wallet.`,
-          [{ text: 'OK', onPress: () => router.back() }]
-        );
+        router.back();
         return;
       }
     } catch (_) {
